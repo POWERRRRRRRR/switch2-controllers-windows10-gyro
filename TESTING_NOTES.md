@@ -48,9 +48,12 @@ python .\src\gui.py
 8. Confirm the right stick scrolls a browser page, document, or file list.
 9. Confirm Mouse Move Stick and Scroll Wheel Stick cannot stay assigned to the same stick.
 10. Confirm optical Joy-con Mouse mode can stay OFF.
+11. Toggle gyro OFF with Capture or Chat and confirm A/B mappings plus explicit Mouse Move Stick and Scroll Wheel Stick still work.
+12. Press and release A/B repeatedly and confirm the short gyro click-suppression window prevents cursor jumps without making stick movement feel delayed.
 
 ## Notes
 
 - Joy-Con optical mouse mode remains controlled by the existing Joy-con Mouse setting and is not required for the gyro stick mouse or stick wheel features.
+- The Gyro trigger controls gyro sensor cursor movement only. Explicit stick mouse, stick wheel, and mouse-button mappings remain active when gyro sensor movement is toggled off.
 - Stick Assist is still separate from the explicit Mouse Move Stick and Scroll Wheel Stick settings. When either explicit stick feature is enabled, the legacy Stick Assist cursor contribution is skipped to avoid hidden stick movement conflicting with scroll or explicit cursor movement.
 - Horizontal wheel events are sent when Windows exposes `MOUSEEVENTF_HWHEEL`; otherwise only vertical wheel movement is expected.

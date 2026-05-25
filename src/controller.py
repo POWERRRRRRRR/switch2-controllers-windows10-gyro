@@ -47,19 +47,22 @@ _MOUSE_BUTTON_EVENTS = {
 
 def _set_global_mouse_button_source(source: str, button_name: str, active: bool):
     if button_name not in _MOUSE_BUTTON_SOURCES:
-        return
+        return False
     with _MOUSE_BUTTON_LOCK:
         sources = _MOUSE_BUTTON_SOURCES[button_name]
         was_pressed = bool(sources)
+        source_was_active = source in sources
         if active:
             sources.add(source)
         else:
             sources.discard(source)
         is_pressed = bool(sources)
+        source_changed = active != source_was_active
     if was_pressed == is_pressed:
-        return
+        return source_changed
     down_event, up_event = _MOUSE_BUTTON_EVENTS[button_name]
     win32api.mouse_event(down_event if is_pressed else up_event, 0, 0, 0, 0)
+    return source_changed
 
 def _release_global_mouse_button_sources(source_prefix: str):
     events_to_release = []
@@ -278,6 +281,9 @@ class Controller:
         
         self.gyro_target_vx = 0.0
         self.gyro_target_vy = 0.0
+        self.gyro_stick_target_vx = 0.0
+        self.gyro_stick_target_vy = 0.0
+        self.gyro_stick_mouse_active = False
         self.jc_target_vx = 0.0    
         self.jc_target_vy = 0.0    
         self.jc_mouse_active = False
@@ -1241,7 +1247,9 @@ class Controller:
         return f"{id(self)}:"
 
     def _set_mouse_button_source(self, source_name: str, button_name: str, active: bool):
-        _set_global_mouse_button_source(f"{self._mouse_source_prefix()}{source_name}", button_name, active)
+        source_changed = _set_global_mouse_button_source(f"{self._mouse_source_prefix()}{source_name}", button_name, active)
+        if source_changed:
+            self.last_click_event_time = time.perf_counter()
 
     def _release_mouse_button_sources(self):
         _release_global_mouse_button_sources(self._mouse_source_prefix())
@@ -1424,6 +1432,9 @@ class Controller:
             self.current_vy = 0.0
             self.interp_residual_x = 0.0
             self.interp_residual_y = 0.0
+            self.gyro_stick_target_vx = 0.0
+            self.gyro_stick_target_vy = 0.0
+            self.gyro_stick_mouse_active = False
             self.gyro_scroll_residual_x = 0.0
             self.gyro_scroll_residual_y = 0.0
             self.gyro_mouse_enabled = False
@@ -1548,178 +1559,160 @@ class Controller:
                 
         self.gr_was_pressed = trigger_pressed
 
-        if self.gyro_mouse_enabled:
-            # Dynamically extract and rotate stick inputs for Stick Assist
+        now = time.perf_counter()
+        current_mode = getattr(CONFIG, "gyro_mode", "World")
+        explicit_stick_mouse_enabled = getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled") != "Disabled"
+        explicit_stick_scroll_enabled = getattr(CONFIG, "gyro_stick_scroll_stick", "Disabled") != "Disabled"
+
+        if current_mode != "Roll":
             is_merged = getattr(self, "is_merged", False)
-            if is_merged:
-                # In merge mode, restrict stick assist to the right stick
-                sx, sy = getattr(self, '_shared_right_stick', inputData.right_stick)
+            is_pro = self.is_pro_controller()
+            
+            if is_pro or is_merged:
+                current_l_click = zr_pressed
+                current_r_click = zl_pressed
+            elif self.is_joycon_right():
+                current_l_click = bool(inputData.buttons & SWITCH_BUTTONS.get("ZR", 0))
+                current_r_click = bool(inputData.buttons & SWITCH_BUTTONS.get("R", 0))
             else:
-                # In single mode
-                if self.is_joycon_left():
-                    sx, sy = inputData.left_stick
-                    if getattr(self, 'hold_mode', 'Vertical') == 'Horizontal':
-                        sx, sy = -sy, sx
-                elif self.is_joycon_right():
-                    sx, sy = inputData.right_stick
-                    if getattr(self, 'hold_mode', 'Vertical') == 'Horizontal':
-                        sx, sy = sy, -sx
-                else:
-                    sx, sy = inputData.right_stick
-            
-            target_vx = 0.0
-            target_vy = 0.0
-            
-            now = time.perf_counter()
-            current_mode = getattr(CONFIG, "gyro_mode", "World")
+                current_l_click = bool(inputData.buttons & SWITCH_BUTTONS.get("ZL", 0))
+                current_r_click = bool(inputData.buttons & SWITCH_BUTTONS.get("L", 0))
 
-            # Hybrid Mouse Button Mapping (Only if NOT in Steering/Roll mode)
-            if current_mode != "Roll":
-                is_merged = getattr(self, "is_merged", False)
-                is_pro = self.is_pro_controller()
-                
-                if is_pro or is_merged:
-                    # Dual / Pro Mode: ZR is Left, ZL is Right
-                    current_l_click = zr_pressed
-                    current_r_click = zl_pressed
-                else:
-                    # Split Mode (Single Joycon behavior)
-                    if self.is_joycon_right():
-                        current_l_click = bool(inputData.buttons & SWITCH_BUTTONS.get("ZR", 0))
-                        current_r_click = bool(inputData.buttons & SWITCH_BUTTONS.get("R", 0))
-                    else:
-                        current_l_click = bool(inputData.buttons & SWITCH_BUTTONS.get("ZL", 0))
-                        current_r_click = bool(inputData.buttons & SWITCH_BUTTONS.get("L", 0))
+            self._set_mouse_button_source("gyro_left_click", "left", current_l_click)
+            self._set_mouse_button_source("gyro_right_click", "right", current_r_click)
+            self.prev_l_click = current_l_click
+            self.prev_r_click = current_r_click
+        else:
+            self._set_mouse_button_source("gyro_left_click", "left", False)
+            self._set_mouse_button_source("gyro_right_click", "right", False)
+            self.prev_l_click = self.prev_r_click = False
 
-                # Detect button press and release for clicks
-                prev_l_click = getattr(self, 'prev_l_click', False)
-                prev_r_click = getattr(self, 'prev_r_click', False)
+        if current_mode != "Roll" and explicit_stick_mouse_enabled:
+            move_sx, move_sy = self._get_configured_stick(inputData, getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled"))
+            move_sx, move_sy = self._apply_radial_deadzone(
+                move_sx,
+                move_sy,
+                getattr(CONFIG, "gyro_stick_mouse_deadzone", 0.15)
+            )
+            move_sens = max(0.0, float(getattr(CONFIG, "gyro_stick_mouse_sensitivity", 5.0))) * 0.66
+            desired_stick_vx = move_sx * move_sens
+            desired_stick_vy = move_sy * -move_sens
 
-                self._set_mouse_button_source("gyro_left_click", "left", current_l_click)
-                self._set_mouse_button_source("gyro_right_click", "right", current_r_click)
-
-                # Track click stabilization window (ONLY on press / down event)
-                if (current_l_click and not prev_l_click) or (current_r_click and not prev_r_click):
-                    self.last_click_event_time = now
-
-                self.prev_l_click = current_l_click
-                self.prev_r_click = current_r_click
+            if abs(desired_stick_vx) < 0.001:
+                self.gyro_stick_target_vx = 0.0
             else:
-                self._set_mouse_button_source("gyro_left_click", "left", False)
-                self._set_mouse_button_source("gyro_right_click", "right", False)
-                self.prev_l_click = self.prev_r_click = False
+                self.gyro_stick_target_vx += (desired_stick_vx - self.gyro_stick_target_vx) * 0.65
 
-            # Suppress movement ONLY during gyro startup (Auto-Leveling period)
-            if now - self.gyro_start_time < 0.05:
-                self.gyro_target_vx = 0.0
-                self.gyro_target_vy = 0.0
-                return
-            
-            gyro_deadzone = 0.2 
-            
+            if abs(desired_stick_vy) < 0.001:
+                self.gyro_stick_target_vy = 0.0
+            else:
+                self.gyro_stick_target_vy += (desired_stick_vy - self.gyro_stick_target_vy) * 0.65
+
+            self.gyro_stick_mouse_active = True
+        else:
+            self.gyro_stick_target_vx = 0.0
+            self.gyro_stick_target_vy = 0.0
+            self.gyro_stick_mouse_active = False
+
+        if current_mode != "Roll" and explicit_stick_scroll_enabled:
+            self._simulate_gyro_stick_scroll(inputData)
+        else:
+            self.gyro_scroll_residual_x = 0.0
+            self.gyro_scroll_residual_y = 0.0
+
+        if not self.gyro_mouse_enabled:
+            self.gyro_target_vx = 0.0
+            self.gyro_target_vy = 0.0
+            self._own_steer_value = 0.0
+            self.gyro_residual_x = self.gyro_residual_y = 0.0
+            return
+
+        target_vx = 0.0
+        target_vy = 0.0
+
+        if now - self.gyro_start_time >= 0.05:
             if current_mode in ["World", "Yaw"]:
                 sensitivity = getattr(CONFIG, "gyro_sensitivity", 0.3)
                 accel_factor = 0.002
                 
-                # Determine vertical sign (invert for Right Joycon in H-mode if needed)
                 v_sign = -1.0
                 if self.is_joycon_right() and self.hold_mode == "Horizontal":
                     v_sign = 1.0
-                
-                # Decoupled gyro mouse movement with 20ms click stabilization
-                # Bypasses gyro coordinate changes for 20ms after click press-down to eliminate finger shake.
-                if (now - getattr(self, "last_click_event_time", 0.0)) >= 0.02:
-                    target_vx += self.eff_h_final * sensitivity * accel_factor
-                    target_vy += self.eff_v_final * v_sign * sensitivity * accel_factor 
+
+                click_elapsed = now - getattr(self, "last_click_event_time", 0.0)
+                if click_elapsed >= 0.075:
+                    click_scale = 1.0 if click_elapsed >= 0.150 else (click_elapsed - 0.075) / 0.075
+                    target_vx += self.eff_h_final * sensitivity * accel_factor * click_scale
+                    target_vy += self.eff_v_final * v_sign * sensitivity * accel_factor * click_scale
             elif current_mode == "Roll":
                 ax, ay, az = inputData.accelerometer
                 
-                # Selection of the correct tilt axis based on orientation
                 is_horizontal = (getattr(self, "hold_mode", "Horizontal") == "Horizontal")
                 if is_horizontal:
-                    # In H-mode, tilt is measured on the Y axis
-                    # Correcting signs: CCW tilt should be Left (Negative Virtual X)
                     if self.is_joycon_right():
-                        tilt_value = ay # Right Joycon CCW -> Y points Down -> ay negative. So Positive steer? No.
+                        tilt_value = ay
                     else:
-                        tilt_value = -ay # Left Joycon CCW -> Y points Up -> ay positive. -ay negative.
+                        tilt_value = -ay
                 else:
-                    # In V-mode or Pro Controller, tilt is on the X axis
                     tilt_value = ax
                 
                 tilt_normalized = tilt_value / 4000.0  
                 sensitivity = getattr(CONFIG, "gyro_sensitivity", 4.0)
-                # Sensitivity * 1.0 (Inverted sign based on user feedback)
-                steer_value = max(-1.0, min(1.0, -tilt_normalized * sensitivity))
-                
-                # Store for virtual controller to apply to correct virtual axis
-                self._own_steer_value = steer_value
+                self._own_steer_value = max(-1.0, min(1.0, -tilt_normalized * sensitivity))
 
-            explicit_stick_mouse_enabled = getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled") != "Disabled"
-            explicit_stick_scroll_enabled = getattr(CONFIG, "gyro_stick_scroll_stick", "Disabled") != "Disabled"
-
-            if current_mode != "Roll":
-                if explicit_stick_mouse_enabled:
-                    move_sx, move_sy = self._get_configured_stick(inputData, getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled"))
-                    move_sx, move_sy = self._apply_radial_deadzone(
-                        move_sx,
-                        move_sy,
-                        getattr(CONFIG, "gyro_stick_mouse_deadzone", 0.15)
-                    )
-                    move_sens = max(0.0, float(getattr(CONFIG, "gyro_stick_mouse_sensitivity", 5.0))) * 0.66
-                    target_vx += move_sx * move_sens
-                    target_vy += move_sy * -move_sens
-
-                if explicit_stick_scroll_enabled:
-                    self._simulate_gyro_stick_scroll(inputData)
-                else:
-                    self.gyro_scroll_residual_x = 0.0
-                    self.gyro_scroll_residual_y = 0.0
+        if current_mode != "Roll" and not explicit_stick_mouse_enabled and not explicit_stick_scroll_enabled:
+            is_merged = getattr(self, "is_merged", False)
+            if is_merged:
+                sx, sy = getattr(self, '_shared_right_stick', inputData.right_stick)
+            elif self.is_joycon_left():
+                sx, sy = inputData.left_stick
+                if getattr(self, 'hold_mode', 'Vertical') == 'Horizontal':
+                    sx, sy = -sy, sx
+            elif self.is_joycon_right():
+                sx, sy = inputData.right_stick
+                if getattr(self, 'hold_mode', 'Vertical') == 'Horizontal':
+                    sx, sy = sy, -sx
             else:
-                self.gyro_scroll_residual_x = 0.0
-                self.gyro_scroll_residual_y = 0.0
+                sx, sy = inputData.right_stick
 
-            # Analog Stick Mouse Movement (Stick Assist) - Only if NOT in Steering mode.
-            # When explicit stick mouse/scroll is enabled, do not also apply the legacy assist path.
-            if current_mode != "Roll" and not explicit_stick_mouse_enabled and not explicit_stick_scroll_enabled:
-                stick_deadzone = 0.05 
-                stick_sens = getattr(CONFIG, "stick_mouse_sensitivity", 20.0) * 0.66
-                
-                stick_magnitude = math.sqrt(sx**2 + sy**2)
-                
-                if stick_magnitude > stick_deadzone:
-                    normalized_mag = (stick_magnitude - stick_deadzone) / (1.0 - stick_deadzone)
-                    normalized_sx = (sx / stick_magnitude) * normalized_mag
-                    normalized_sy = (sy / stick_magnitude) * normalized_mag
-                    
-                    target_vx += normalized_sx * stick_sens
-                    target_vy += normalized_sy * -stick_sens
+            stick_deadzone = 0.05
+            stick_sens = getattr(CONFIG, "stick_mouse_sensitivity", 20.0) * 0.66
+            stick_magnitude = math.sqrt(sx**2 + sy**2)
 
-            self.gyro_target_vx = target_vx
-            self.gyro_target_vy = target_vy
+            if stick_magnitude > stick_deadzone:
+                normalized_mag = (stick_magnitude - stick_deadzone) / (1.0 - stick_deadzone)
+                normalized_sx = (sx / stick_magnitude) * normalized_mag
+                normalized_sy = (sy / stick_magnitude) * normalized_mag
 
-        else:
-            self.gyro_target_vx = 0.0
-            self.gyro_target_vy = 0.0
-            self._own_steer_value = 0.0
-            self._set_mouse_button_source("gyro_left_click", "left", False)
-            self._set_mouse_button_source("gyro_right_click", "right", False)
-            self.prev_l_click = self.prev_r_click = False
-            self.gyro_residual_x = self.gyro_residual_y = 0.0
-            self.gyro_scroll_residual_x = self.gyro_scroll_residual_y = 0.0
-            self.current_vx = self.current_vy = 0.0
-            self.interp_residual_x = self.interp_residual_y = 0.0
+                target_vx += normalized_sx * stick_sens
+                target_vy += normalized_sy * -stick_sens
+
+        self.gyro_target_vx = target_vx
+        self.gyro_target_vy = target_vy
 
     def _interpolation_thread_loop(self):
         last_time = time.perf_counter()
         while self.interp_running:
-            if self.client and self.client.is_connected and (self.gyro_mouse_enabled or getattr(self, 'jc_mouse_active', False)):
+            mouse_active = (
+                self.gyro_mouse_enabled or
+                getattr(self, 'gyro_stick_mouse_active', False) or
+                getattr(self, 'jc_mouse_active', False)
+            )
+            if self.client and self.client.is_connected and mouse_active:
                 if getattr(self, 'is_calibrating', False):
                     self.current_vx = 0.0
                     self.current_vy = 0.0
                 else:
-                    self.current_vx = self.gyro_target_vx + getattr(self, 'jc_target_vx', 0.0)
-                    self.current_vy = self.gyro_target_vy + getattr(self, 'jc_target_vy', 0.0)
+                    self.current_vx = (
+                        self.gyro_target_vx +
+                        getattr(self, 'gyro_stick_target_vx', 0.0) +
+                        getattr(self, 'jc_target_vx', 0.0)
+                    )
+                    self.current_vy = (
+                        self.gyro_target_vy +
+                        getattr(self, 'gyro_stick_target_vy', 0.0) +
+                        getattr(self, 'jc_target_vy', 0.0)
+                    )
 
                 now = time.perf_counter()
                 dt = now - last_time
