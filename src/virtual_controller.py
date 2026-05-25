@@ -236,6 +236,11 @@ class VirtualController:
         controller._last_raw_buttons = 0
         controller.gyro_target_vx = 0.0
         controller.gyro_target_vy = 0.0
+        controller.gyro_stick_target_vx = 0.0
+        controller.gyro_stick_target_vy = 0.0
+        controller.gyro_stick_mouse_active = False
+        controller.gyro_click_suppress_until = 0.0
+        controller.gyro_click_ramp_until = 0.0
         controller.current_vx = 0.0
         controller.current_vy = 0.0
         controller.interp_residual_x = 0.0
@@ -246,8 +251,18 @@ class VirtualController:
             if self.vg_controller is None:
                 return
             
-            if len(self.controllers) == 2 or controller.is_pro_controller():
-                controller.gyro_active = (controller.is_joycon_left() and self.active_gyro_side == "Left") or (controller.is_joycon_right() and self.active_gyro_side == "Right") or controller.is_pro_controller()
+            if len(self.controllers) == 2:
+                for c in self.controllers:
+                    c.gyro_active = (
+                        (c.is_joycon_left() and self.active_gyro_side == "Left") or
+                        (c.is_joycon_right() and self.active_gyro_side == "Right") or
+                        c.is_pro_controller()
+                    )
+                    c.hold_mode = "Vertical"
+                controller.gyro_active = getattr(controller, "gyro_active", False)
+                controller.hold_mode = "Vertical"
+            elif controller.is_pro_controller():
+                controller.gyro_active = True
                 controller.hold_mode = "Vertical"
             else:
                 controller.gyro_active = True

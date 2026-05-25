@@ -441,6 +441,14 @@ class PlayerInfoBlock:
                 left_mac = None
                 right_mac = None
                 for c in self.current_vc.controllers:
+                    c.gyro_active = (
+                        (c.is_joycon_left() and val == "Left") or
+                        (c.is_joycon_right() and val == "Right") or
+                        c.is_pro_controller()
+                    )
+                    c.hold_mode = "Vertical"
+                    if hasattr(c, "_reset_gyro_mouse_outputs"):
+                        c._reset_gyro_mouse_outputs(reset_activation=True, reset_stick=True)
                     if c.is_joycon_left():
                         left_mac = c.device.address
                     elif c.is_joycon_right():
@@ -722,14 +730,14 @@ class PlayerInfoBlock:
             if getattr(self, 'mode_switch', None): self.mode_switch.place_forget()
 
             if not getattr(self, 'gyro_btn_l', None):
-                self.gyro_frame_l = tk.Frame(self.battery_frame, bg=block_color)
-                self.gyro_frame_r = tk.Frame(self.battery_frame, bg=block_color)
-                self.gyro_btn_l = tk.Button(self.gyro_frame_l, text="L Gyro", font=scale_font(("Arial", 8, "bold")), bd=0, relief=tk.FLAT, command=lambda: self._on_gyro_side_toggled("Left"))
-                self.gyro_btn_r = tk.Button(self.gyro_frame_r, text="R Gyro", font=scale_font(("Arial", 8, "bold")), bd=0, relief=tk.FLAT, command=lambda: self._on_gyro_side_toggled("Right"))
+                self.gyro_frame_l = tk.Frame(self.controllers_frame, bg=block_color)
+                self.gyro_frame_r = tk.Frame(self.controllers_frame, bg=block_color)
+                self.gyro_btn_l = tk.Button(self.gyro_frame_l, text="L Gyro", font=scale_font(("Arial", 8, "bold")), bd=0, relief=tk.FLAT, highlightthickness=0, command=lambda: self._on_gyro_side_toggled("Left"))
+                self.gyro_btn_r = tk.Button(self.gyro_frame_r, text="R Gyro", font=scale_font(("Arial", 8, "bold")), bd=0, relief=tk.FLAT, highlightthickness=0, command=lambda: self._on_gyro_side_toggled("Right"))
                 self.gyro_btn_l.pack(); self.gyro_btn_r.pack()
 
-            self.gyro_frame_l.place(relx=0.04, rely=0.5, anchor=tk.W)
-            self.gyro_frame_r.place(relx=0.96, rely=0.5, anchor=tk.E)
+            self.gyro_frame_l.place(x=int(5 * scaling_factor), y=int(42 * scaling_factor))
+            self.gyro_frame_r.place(x=int(150 * scaling_factor), y=int(42 * scaling_factor))
             if virtualController.active_gyro_side == "Left":
                 self.gyro_frame_l.config(bg=highlight_color)
                 self.gyro_frame_r.config(bg=button_gray)

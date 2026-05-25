@@ -47,7 +47,7 @@ _MOUSE_BUTTON_EVENTS = {
 
 def _set_global_mouse_button_source(source: str, button_name: str, active: bool):
     if button_name not in _MOUSE_BUTTON_SOURCES:
-        return False
+        return None
     with _MOUSE_BUTTON_LOCK:
         sources = _MOUSE_BUTTON_SOURCES[button_name]
         was_pressed = bool(sources)
@@ -59,10 +59,12 @@ def _set_global_mouse_button_source(source: str, button_name: str, active: bool)
         is_pressed = bool(sources)
         source_changed = active != source_was_active
     if was_pressed == is_pressed:
-        return source_changed
+        if not source_changed:
+            return None
+        return "press" if active else "release"
     down_event, up_event = _MOUSE_BUTTON_EVENTS[button_name]
     win32api.mouse_event(down_event if is_pressed else up_event, 0, 0, 0, 0)
-    return source_changed
+    return "press" if active else "release"
 
 def _release_global_mouse_button_sources(source_prefix: str):
     events_to_release = []
@@ -278,6 +280,8 @@ class Controller:
         self.prev_screenshot = False
         self.prev_key_c = False
         self.last_click_event_time = 0.0
+        self.gyro_click_suppress_until = 0.0
+        self.gyro_click_ramp_until = 0.0
         
         self.gyro_target_vx = 0.0
         self.gyro_target_vy = 0.0
@@ -295,6 +299,8 @@ class Controller:
         self.interp_residual_y = 0.0
         self.interp_task = None
         self.virtual_controller = None
+        self.gyro_active = True
+        self.is_merged = False
         
         self.is_calibrating = False
         self.calibration_end_time = 0
@@ -811,6 +817,7 @@ class Controller:
             is_left = self.is_joycon_left()
             is_right = self.is_joycon_right()
             is_pro = self.is_pro_controller()
+            self._sync_virtual_controller_motion_context()
 
             # Filter out virtual button bits and garbage bits from physical reports (retaining only valid physical bits <= 0x03FFFFFF)
             inputData.buttons &= 0x03FFFFFF
@@ -1247,12 +1254,76 @@ class Controller:
         return f"{id(self)}:"
 
     def _set_mouse_button_source(self, source_name: str, button_name: str, active: bool):
-        source_changed = _set_global_mouse_button_source(f"{self._mouse_source_prefix()}{source_name}", button_name, active)
-        if source_changed:
-            self.last_click_event_time = time.perf_counter()
+        change = _set_global_mouse_button_source(f"{self._mouse_source_prefix()}{source_name}", button_name, active)
+        if change:
+            now = time.perf_counter()
+            self.last_click_event_time = now
+            if change == "press":
+                suppress_for = 0.035
+                ramp_for = 0.050
+            else:
+                suppress_for = 0.020
+                ramp_for = 0.035
+            self.gyro_click_suppress_until = max(
+                getattr(self, "gyro_click_suppress_until", 0.0),
+                now + suppress_for
+            )
+            self.gyro_click_ramp_until = max(
+                getattr(self, "gyro_click_ramp_until", 0.0),
+                now + suppress_for + ramp_for
+            )
 
     def _release_mouse_button_sources(self):
         _release_global_mouse_button_sources(self._mouse_source_prefix())
+
+    def _reset_gyro_mouse_outputs(self, reset_activation: bool = False, reset_stick: bool = False):
+        self.gyro_target_vx = 0.0
+        self.gyro_target_vy = 0.0
+        self.current_vx = 0.0
+        self.current_vy = 0.0
+        self.interp_residual_x = 0.0
+        self.interp_residual_y = 0.0
+        self.gyro_residual_x = 0.0
+        self.gyro_residual_y = 0.0
+        self._own_steer_value = 0.0
+        if reset_stick:
+            self.gyro_stick_target_vx = 0.0
+            self.gyro_stick_target_vy = 0.0
+            self.gyro_stick_mouse_active = False
+            self.gyro_scroll_residual_x = 0.0
+            self.gyro_scroll_residual_y = 0.0
+        if reset_activation:
+            self.gyro_mouse_enabled = False
+            self.gr_was_pressed = False
+        self._set_mouse_button_source("gyro_left_click", "left", False)
+        self._set_mouse_button_source("gyro_right_click", "right", False)
+
+    def _sync_virtual_controller_motion_context(self):
+        vc = getattr(self, "virtual_controller", None)
+        if vc is None:
+            self.is_merged = False
+            self.gyro_active = True
+            return
+
+        is_merged = len(getattr(vc, "controllers", [])) == 2
+        if is_merged:
+            active_side = getattr(vc, "active_gyro_side", "Right")
+            for controller in vc.controllers:
+                controller.is_merged = True
+                controller.hold_mode = "Vertical"
+                controller.gyro_active = (
+                    (controller.is_joycon_left() and active_side == "Left") or
+                    (controller.is_joycon_right() and active_side == "Right") or
+                    controller.is_pro_controller()
+                )
+            return
+
+        self.is_merged = False
+        self.gyro_active = True
+        if self.is_pro_controller():
+            self.hold_mode = "Vertical"
+        else:
+            self.hold_mode = getattr(vc, "hold_mode", getattr(self, "hold_mode", "Horizontal"))
 
     def _apply_radial_deadzone(self, sx: float, sy: float, deadzone: float):
         deadzone = max(0.0, min(0.95, float(deadzone)))
@@ -1426,20 +1497,7 @@ class Controller:
 
         if not getattr(self, 'gyro_active', True):
             # Reset all speed states to prevent drift when switching Gyro sides
-            self.gyro_target_vx = 0.0
-            self.gyro_target_vy = 0.0
-            self.current_vx = 0.0
-            self.current_vy = 0.0
-            self.interp_residual_x = 0.0
-            self.interp_residual_y = 0.0
-            self.gyro_stick_target_vx = 0.0
-            self.gyro_stick_target_vy = 0.0
-            self.gyro_stick_mouse_active = False
-            self.gyro_scroll_residual_x = 0.0
-            self.gyro_scroll_residual_y = 0.0
-            self.gyro_mouse_enabled = False
-            self._set_mouse_button_source("gyro_left_click", "left", False)
-            self._set_mouse_button_source("gyro_right_click", "right", False)
+            self._reset_gyro_mouse_outputs(reset_activation=True, reset_stick=True)
             return
 
         activation_mode = getattr(CONFIG, "gyro_activation_mode", "Toggle")
@@ -1639,9 +1697,15 @@ class Controller:
                 if self.is_joycon_right() and self.hold_mode == "Horizontal":
                     v_sign = 1.0
 
-                click_elapsed = now - getattr(self, "last_click_event_time", 0.0)
-                if click_elapsed >= 0.075:
-                    click_scale = 1.0 if click_elapsed >= 0.150 else (click_elapsed - 0.075) / 0.075
+                suppress_until = getattr(self, "gyro_click_suppress_until", 0.0)
+                ramp_until = getattr(self, "gyro_click_ramp_until", 0.0)
+                if now >= ramp_until:
+                    click_scale = 1.0
+                elif now < suppress_until:
+                    click_scale = 0.0
+                else:
+                    click_scale = (now - suppress_until) / max(0.001, ramp_until - suppress_until)
+                if click_scale > 0.0:
                     target_vx += self.eff_h_final * sensitivity * accel_factor * click_scale
                     target_vy += self.eff_v_final * v_sign * sensitivity * accel_factor * click_scale
             elif current_mode == "Roll":
