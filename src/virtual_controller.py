@@ -229,6 +229,10 @@ class VirtualController:
         controller._shared_zr_pressed = False
         controller._own_zl_pressed = False
         controller._shared_zl_pressed = False
+        controller._own_left_stick = (0.0, 0.0)
+        controller._own_right_stick = (0.0, 0.0)
+        controller._shared_left_stick = (0.0, 0.0)
+        controller._shared_right_stick = (0.0, 0.0)
         controller._last_raw_buttons = 0
         controller.gyro_target_vx = 0.0
         controller.gyro_target_vy = 0.0
@@ -264,22 +268,23 @@ class VirtualController:
                 
                 # Sync Steer Value (From the gyro-active controller)
                 shared_steer = 0.0
+                shared_ls = (0.0, 0.0)
                 shared_rs = (0.0, 0.0)
                 for c in self.controllers:
                     if getattr(c, 'gyro_active', False):
                         shared_steer = getattr(c, '_own_steer_value', 0.0)
+                    if c.is_joycon_left():
+                        shared_ls = getattr(c, '_own_left_stick', (0.0, 0.0))
                     if c.is_joycon_right():
-                        shared_rs = inputData.right_stick if c == controller else getattr(c, '_last_rs', (0.0, 0.0))
+                        shared_rs = getattr(c, '_own_right_stick', (0.0, 0.0))
 
                 for c in self.controllers:
                     c._shared_gyro_trigger = shared_gyro
                     c._shared_zr_pressed = shared_zr
                     c._shared_zl_pressed = shared_zl
                     c._shared_steer_value = shared_steer
+                    c._shared_left_stick = shared_ls
                     c._shared_right_stick = shared_rs
-                
-                if controller.is_joycon_right():
-                    controller._last_rs = inputData.right_stick
                 
                 # Sync activation state across controllers for consistent steering/mouse behavior
                 # Only for Hold mode; Toggle mode naturally syncs via shared trigger

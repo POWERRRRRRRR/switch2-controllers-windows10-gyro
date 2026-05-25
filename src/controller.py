@@ -33,6 +33,47 @@ logging.basicConfig(
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
+_MOUSE_BUTTON_LOCK = threading.Lock()
+_MOUSE_BUTTON_SOURCES = {
+    "left": set(),
+    "middle": set(),
+    "right": set(),
+}
+_MOUSE_BUTTON_EVENTS = {
+    "left": (win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP),
+    "middle": (win32con.MOUSEEVENTF_MIDDLEDOWN, win32con.MOUSEEVENTF_MIDDLEUP),
+    "right": (win32con.MOUSEEVENTF_RIGHTDOWN, win32con.MOUSEEVENTF_RIGHTUP),
+}
+
+def _set_global_mouse_button_source(source: str, button_name: str, active: bool):
+    if button_name not in _MOUSE_BUTTON_SOURCES:
+        return
+    with _MOUSE_BUTTON_LOCK:
+        sources = _MOUSE_BUTTON_SOURCES[button_name]
+        was_pressed = bool(sources)
+        if active:
+            sources.add(source)
+        else:
+            sources.discard(source)
+        is_pressed = bool(sources)
+    if was_pressed == is_pressed:
+        return
+    down_event, up_event = _MOUSE_BUTTON_EVENTS[button_name]
+    win32api.mouse_event(down_event if is_pressed else up_event, 0, 0, 0, 0)
+
+def _release_global_mouse_button_sources(source_prefix: str):
+    events_to_release = []
+    with _MOUSE_BUTTON_LOCK:
+        for button_name, sources in _MOUSE_BUTTON_SOURCES.items():
+            was_pressed = bool(sources)
+            stale_sources = {source for source in sources if source.startswith(source_prefix)}
+            sources.difference_update(stale_sources)
+            if was_pressed and not sources:
+                events_to_release.append(button_name)
+    for button_name in events_to_release:
+        _, up_event = _MOUSE_BUTTON_EVENTS[button_name]
+        win32api.mouse_event(up_event, 0, 0, 0, 0)
+
 # Controller identification info
 NINTENDO_VENDOR_ID = 0x057e
 JOYCON2_RIGHT_PID = 0x2066
@@ -240,6 +281,8 @@ class Controller:
         self.jc_target_vx = 0.0    
         self.jc_target_vy = 0.0    
         self.jc_mouse_active = False
+        self.gyro_scroll_residual_x = 0.0
+        self.gyro_scroll_residual_y = 0.0
         self.current_vx = 0.0
         self.current_vy = 0.0
         self.interp_residual_x = 0.0
@@ -596,6 +639,7 @@ class Controller:
                 except Exception as e:
                     logger.debug(f"Bluetooth disconnect error (ignored): {e}")
             self.client = None
+        self._release_mouse_button_sources()
         logger.info(f"Controller {self.device.address}: Disconnected.")
 
     ### Commands & Features ###
@@ -755,6 +799,8 @@ class Controller:
             inputData = ControllerInputData(data, self.stick_calibration, self.second_stick_calibration)
             self.battery_voltage = inputData.battery_voltage
             self.last_accel = inputData.accelerometer
+            self._own_left_stick = inputData.left_stick
+            self._own_right_stick = inputData.right_stick
 
             is_left = self.is_joycon_left()
             is_right = self.is_joycon_right()
@@ -797,6 +843,11 @@ class Controller:
                 "SR_R": bool(inputData.buttons & 0x00000010) if is_right else False
             }
 
+            raw_left_pressed  = bool(inputData.buttons & 0x01)
+            raw_up_pressed    = bool(inputData.buttons & 0x02)
+            raw_down_pressed  = bool(inputData.buttons & 0x04)
+            raw_right_pressed = bool(inputData.buttons & 0x08)
+            inputData.buttons &= ~0x0F
             inputData.buttons &= ~(0x03307030)
 
             trigger_gyro = False
@@ -835,6 +886,68 @@ class Controller:
                         inputData.buttons |= original_bit
                     elif resolved in SWITCH_BUTTONS:
                         inputData.buttons |= SWITCH_BUTTONS[resolved]
+
+            abxy_mode = getattr(CONFIG, "abxy_mode", "Xbox")
+            physical_face_pressed = {
+                "A": raw_right_pressed,
+                "B": raw_down_pressed,
+                "X": raw_up_pressed,
+                "Y": raw_left_pressed,
+            }
+
+            if abxy_mode == "Switch":
+                default_face_output = {
+                    "A": SWITCH_BUTTONS["B"],
+                    "B": SWITCH_BUTTONS["A"],
+                    "X": SWITCH_BUTTONS["Y"],
+                    "Y": SWITCH_BUTTONS["X"],
+                }
+            else:
+                default_face_output = {
+                    "A": SWITCH_BUTTONS["A"],
+                    "B": SWITCH_BUTTONS["B"],
+                    "X": SWITCH_BUTTONS["X"],
+                    "Y": SWITCH_BUTTONS["Y"],
+                }
+
+            face_buttons = ["A", "B", "X", "Y"]
+
+            def apply_face_mapping(button_name: str, is_pressed: bool, action: str, default_button: int):
+                nonlocal trigger_gyro, trigger_screenshot, trigger_key_c, trigger_game_bar, trigger_hdr_toggle, trigger_calibration
+                action = getattr(CONFIG, "_normalize_button_mapping", lambda value: value)(action)
+                self._set_mouse_button_source(f"map_{button_name}_left", "left", is_pressed and action == "Mouse Left Click")
+                self._set_mouse_button_source(f"map_{button_name}_right", "right", is_pressed and action == "Mouse Right Click")
+                self._set_mouse_button_source(f"map_{button_name}_middle", "middle", is_pressed and action == "Mouse Middle Click")
+                if not is_pressed:
+                    return
+                if action == "Default":
+                    inputData.buttons |= default_button
+                elif action == "Gyro":
+                    trigger_gyro = True
+                elif action == "Home":
+                    inputData.buttons |= SWITCH_BUTTONS["HOME"]
+                elif action == "Capture":
+                    trigger_screenshot = True
+                elif action == "Chat":
+                    trigger_key_c = True
+                elif action == "Mute":
+                    inputData.buttons |= 0x10000000
+                elif action == "Calibration":
+                    trigger_calibration = True
+                elif action == "Game Bar":
+                    trigger_game_bar = True
+                elif action == "HDR Toggle":
+                    trigger_hdr_toggle = True
+                elif action in SWITCH_BUTTONS:
+                    inputData.buttons |= SWITCH_BUTTONS[action]
+
+            for button_name in face_buttons:
+                apply_face_mapping(
+                    button_name,
+                    physical_face_pressed[button_name],
+                    getattr(CONFIG, f"{button_name.lower()}_mapping", "Default"),
+                    default_face_output[button_name]
+                )
 
             if trigger_calibration and not getattr(self, 'prev_calibration', False):
                 self._handle_calibration_button_pressed()
@@ -878,24 +991,6 @@ class Controller:
                 if self.input_report_callback is not None:
                     self.input_report_callback(inputData, self)
                 return
-
-            raw_left_pressed  = bool(inputData.buttons & 0x01)
-            raw_up_pressed    = bool(inputData.buttons & 0x02)
-            raw_down_pressed  = bool(inputData.buttons & 0x04)
-            raw_right_pressed = bool(inputData.buttons & 0x08)
-            inputData.buttons &= ~0x0F
-            
-            abxy_mode = getattr(CONFIG, "abxy_mode", "Xbox")
-            if abxy_mode == "Switch":
-                if raw_down_pressed:  inputData.buttons |= 0x08
-                if raw_right_pressed: inputData.buttons |= 0x04
-                if raw_left_pressed:  inputData.buttons |= 0x02
-                if raw_up_pressed:    inputData.buttons |= 0x01
-            else:
-                if raw_right_pressed: inputData.buttons |= 0x08
-                if raw_down_pressed:  inputData.buttons |= 0x04
-                if raw_up_pressed:    inputData.buttons |= 0x02
-                if raw_left_pressed:  inputData.buttons |= 0x01
 
             if trigger_screenshot and not getattr(self, 'prev_screenshot', False):
                 win32api.keybd_event(0x5B, 0, 0, 0)
@@ -1141,6 +1236,80 @@ class Controller:
                 self.gyro_bias_integral[1] + error_accel[1] * ki_base * dt * kp_scale,
                 self.gyro_bias_integral[2] + error_accel[2] * ki_base * dt * kp_scale
             )
+
+    def _mouse_source_prefix(self):
+        return f"{id(self)}:"
+
+    def _set_mouse_button_source(self, source_name: str, button_name: str, active: bool):
+        _set_global_mouse_button_source(f"{self._mouse_source_prefix()}{source_name}", button_name, active)
+
+    def _release_mouse_button_sources(self):
+        _release_global_mouse_button_sources(self._mouse_source_prefix())
+
+    def _apply_radial_deadzone(self, sx: float, sy: float, deadzone: float):
+        deadzone = max(0.0, min(0.95, float(deadzone)))
+        magnitude = math.sqrt(sx * sx + sy * sy)
+        if magnitude <= deadzone or magnitude <= 0.0:
+            return 0.0, 0.0
+        normalized_mag = (magnitude - deadzone) / (1.0 - deadzone)
+        return (sx / magnitude) * normalized_mag, (sy / magnitude) * normalized_mag
+
+    def _apply_axis_deadzone(self, value: float, deadzone: float):
+        deadzone = max(0.0, min(0.95, float(deadzone)))
+        magnitude = abs(value)
+        if magnitude <= deadzone:
+            return 0.0
+        return math.copysign((magnitude - deadzone) / (1.0 - deadzone), value)
+
+    def _get_configured_stick(self, inputData: ControllerInputData, stick_name: str):
+        if stick_name == "Left Stick":
+            if getattr(self, "is_merged", False):
+                return getattr(self, "_shared_left_stick", getattr(self, "_own_left_stick", (0.0, 0.0)))
+            if self.is_pro_controller() or self.is_joycon_left():
+                sx, sy = inputData.left_stick
+                if self.is_joycon_left() and getattr(self, 'hold_mode', 'Vertical') == 'Horizontal':
+                    return -sy, sx
+                return sx, sy
+            return 0.0, 0.0
+
+        if stick_name == "Right Stick":
+            if getattr(self, "is_merged", False):
+                return getattr(self, "_shared_right_stick", getattr(self, "_own_right_stick", (0.0, 0.0)))
+            if self.is_pro_controller() or self.is_joycon_right():
+                sx, sy = inputData.right_stick
+                if self.is_joycon_right() and getattr(self, 'hold_mode', 'Vertical') == 'Horizontal':
+                    return sy, -sx
+                return sx, sy
+            return 0.0, 0.0
+
+        return 0.0, 0.0
+
+    def _simulate_gyro_stick_scroll(self, inputData: ControllerInputData):
+        stick_name = getattr(CONFIG, "gyro_stick_scroll_stick", "Disabled")
+        if stick_name == "Disabled":
+            self.gyro_scroll_residual_x = 0.0
+            self.gyro_scroll_residual_y = 0.0
+            return
+
+        sx, sy = self._get_configured_stick(inputData, stick_name)
+        deadzone = getattr(CONFIG, "gyro_stick_scroll_deadzone", 0.20)
+        scroll_x = self._apply_axis_deadzone(sx, deadzone)
+        scroll_y = self._apply_axis_deadzone(sy, deadzone)
+        sensitivity = max(0.0, float(getattr(CONFIG, "gyro_stick_scroll_sensitivity", 1.0)))
+
+        self.gyro_scroll_residual_y += scroll_y * 60.0 * sensitivity
+        wheel_delta = int(self.gyro_scroll_residual_y)
+        if wheel_delta != 0:
+            self.gyro_scroll_residual_y -= wheel_delta
+            win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, wheel_delta, 0)
+
+        h_wheel_event = getattr(win32con, "MOUSEEVENTF_HWHEEL", 0x01000)
+        if h_wheel_event:
+            self.gyro_scroll_residual_x += scroll_x * 60.0 * sensitivity
+            h_wheel_delta = int(self.gyro_scroll_residual_x)
+            if h_wheel_delta != 0:
+                self.gyro_scroll_residual_x -= h_wheel_delta
+                win32api.mouse_event(h_wheel_event, 0, 0, h_wheel_delta, 0)
         
     def simulate_mouse(self, inputData: ControllerInputData):
         mouse_config = CONFIG.mouse_config
@@ -1255,7 +1424,11 @@ class Controller:
             self.current_vy = 0.0
             self.interp_residual_x = 0.0
             self.interp_residual_y = 0.0
+            self.gyro_scroll_residual_x = 0.0
+            self.gyro_scroll_residual_y = 0.0
             self.gyro_mouse_enabled = False
+            self._set_mouse_button_source("gyro_left_click", "left", False)
+            self._set_mouse_button_source("gyro_right_click", "right", False)
             return
 
         activation_mode = getattr(CONFIG, "gyro_activation_mode", "Toggle")
@@ -1422,12 +1595,8 @@ class Controller:
                 prev_l_click = getattr(self, 'prev_l_click', False)
                 prev_r_click = getattr(self, 'prev_r_click', False)
 
-                # Inject mouse clicks immediately
-                if current_l_click and not prev_l_click: win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                elif not current_l_click and prev_l_click: win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                
-                if current_r_click and not prev_r_click: win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
-                elif not current_r_click and prev_r_click: win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                self._set_mouse_button_source("gyro_left_click", "left", current_l_click)
+                self._set_mouse_button_source("gyro_right_click", "right", current_r_click)
 
                 # Track click stabilization window (ONLY on press / down event)
                 if (current_l_click and not prev_l_click) or (current_r_click and not prev_r_click):
@@ -1435,6 +1604,10 @@ class Controller:
 
                 self.prev_l_click = current_l_click
                 self.prev_r_click = current_r_click
+            else:
+                self._set_mouse_button_source("gyro_left_click", "left", False)
+                self._set_mouse_button_source("gyro_right_click", "right", False)
+                self.prev_l_click = self.prev_r_click = False
 
             # Suppress movement ONLY during gyro startup (Auto-Leveling period)
             if now - self.gyro_start_time < 0.05:
@@ -1482,9 +1655,33 @@ class Controller:
                 # Store for virtual controller to apply to correct virtual axis
                 self._own_steer_value = steer_value
 
+            explicit_stick_mouse_enabled = getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled") != "Disabled"
+            explicit_stick_scroll_enabled = getattr(CONFIG, "gyro_stick_scroll_stick", "Disabled") != "Disabled"
 
-            # Analog Stick Mouse Movement (Stick Assist) - Only if NOT in Steering mode
             if current_mode != "Roll":
+                if explicit_stick_mouse_enabled:
+                    move_sx, move_sy = self._get_configured_stick(inputData, getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled"))
+                    move_sx, move_sy = self._apply_radial_deadzone(
+                        move_sx,
+                        move_sy,
+                        getattr(CONFIG, "gyro_stick_mouse_deadzone", 0.15)
+                    )
+                    move_sens = max(0.0, float(getattr(CONFIG, "gyro_stick_mouse_sensitivity", 5.0))) * 0.66
+                    target_vx += move_sx * move_sens
+                    target_vy += move_sy * -move_sens
+
+                if explicit_stick_scroll_enabled:
+                    self._simulate_gyro_stick_scroll(inputData)
+                else:
+                    self.gyro_scroll_residual_x = 0.0
+                    self.gyro_scroll_residual_y = 0.0
+            else:
+                self.gyro_scroll_residual_x = 0.0
+                self.gyro_scroll_residual_y = 0.0
+
+            # Analog Stick Mouse Movement (Stick Assist) - Only if NOT in Steering mode.
+            # When explicit stick mouse/scroll is enabled, do not also apply the legacy assist path.
+            if current_mode != "Roll" and not explicit_stick_mouse_enabled and not explicit_stick_scroll_enabled:
                 stick_deadzone = 0.05 
                 stick_sens = getattr(CONFIG, "stick_mouse_sensitivity", 20.0) * 0.66
                 
@@ -1505,10 +1702,11 @@ class Controller:
             self.gyro_target_vx = 0.0
             self.gyro_target_vy = 0.0
             self._own_steer_value = 0.0
-            if getattr(self, 'prev_l_click', False): win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            if getattr(self, 'prev_r_click', False): win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+            self._set_mouse_button_source("gyro_left_click", "left", False)
+            self._set_mouse_button_source("gyro_right_click", "right", False)
             self.prev_l_click = self.prev_r_click = False
             self.gyro_residual_x = self.gyro_residual_y = 0.0
+            self.gyro_scroll_residual_x = self.gyro_scroll_residual_y = 0.0
             self.current_vx = self.current_vy = 0.0
             self.interp_residual_x = self.interp_residual_y = 0.0
 

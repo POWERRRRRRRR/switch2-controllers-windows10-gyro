@@ -44,6 +44,12 @@ BACK_BUTTON_OPTIONS = [
     "MINUS", "PLUS", "L_STK", "R_STK", "UP", "DOWN", "LEFT", "RIGHT"
 ]
 
+BUTTON_MAPPING_OPTIONS = [
+    "Default", "Mouse Left Click", "Mouse Right Click", "Mouse Middle Click"
+] + [option for option in BACK_BUTTON_OPTIONS if option != "Default"]
+
+STICK_ASSIGNMENT_OPTIONS = ["Disabled", "Left Stick", "Right Stick"]
+
 XB_BUTTONS = {
     "UP": 0x0001,
     "DOWN": 0x0002,
@@ -148,6 +154,14 @@ def get_resource(resource_path: str):
     return os.path.join(get_app_root(), 'resources', resource_path)
 
 class Config:
+    @staticmethod
+    def _normalize_stick_assignment(value):
+        return value if value in STICK_ASSIGNMENT_OPTIONS else "Disabled"
+
+    @staticmethod
+    def _normalize_button_mapping(value):
+        return value if value in BUTTON_MAPPING_OPTIONS else "Default"
+
     def __init__(self, config_file_path: str):
         if hasattr(sys, 'frozen'):
             base_dir = os.path.dirname(sys.executable)
@@ -237,6 +251,10 @@ class Config:
         self.home_mapping = config.get("home_mapping", "Default")
         _capt = config.get("capt_mapping", "Capture")
         self.capt_mapping = "Capture" if _capt in ("None", "CAPT", "Default") else _capt
+        self.a_mapping = self._normalize_button_mapping(config.get("a_mapping", "Default"))
+        self.b_mapping = self._normalize_button_mapping(config.get("b_mapping", "Default"))
+        self.x_mapping = self._normalize_button_mapping(config.get("x_mapping", "Default"))
+        self.y_mapping = self._normalize_button_mapping(config.get("y_mapping", "Default"))
         self.abxy_mode = config.get("abxy_mode", "Xbox") 
         
         self.gyro_mode = config.get("gyro_mode", "World")
@@ -244,6 +262,13 @@ class Config:
         self.gyro_smoothing = 0.0 
         self.gyro_activation_mode = config.get("gyro_activation_mode", "Toggle")
         self.stick_mouse_sensitivity = float(config.get("stick_mouse_sensitivity", 20.0))
+        self.gyro_stick_mouse_stick = self._normalize_stick_assignment(config.get("gyro_stick_mouse_stick", "Disabled"))
+        self.gyro_stick_mouse_sensitivity = float(config.get("gyro_stick_mouse_sensitivity", 5.0))
+        self.gyro_stick_mouse_deadzone = float(config.get("gyro_stick_mouse_deadzone", 0.15))
+        self.gyro_stick_scroll_stick = self._normalize_stick_assignment(config.get("gyro_stick_scroll_stick", "Disabled"))
+        self.gyro_stick_scroll_sensitivity = float(config.get("gyro_stick_scroll_sensitivity", 1.0))
+        self.gyro_stick_scroll_deadzone = float(config.get("gyro_stick_scroll_deadzone", 0.20))
+        self.validate_gyro_stick_assignments()
         
         self.gyro_bias_l = config.get("gyro_bias_l", [0.0, 0.0, 0.0])
         self.gyro_bias_r = config.get("gyro_bias_r", [0.0, 0.0, 0.0])
@@ -278,9 +303,21 @@ class Config:
         self.vibration_frequency = int(config.get("vibration_frequency", 10))
 
         logger.info(f"Config successfully loaded from {self.config_file_path}")
+
+    def validate_gyro_stick_assignments(self):
+        self.gyro_stick_mouse_stick = self._normalize_stick_assignment(getattr(self, "gyro_stick_mouse_stick", "Disabled"))
+        self.gyro_stick_scroll_stick = self._normalize_stick_assignment(getattr(self, "gyro_stick_scroll_stick", "Disabled"))
+        if (
+            self.gyro_stick_mouse_stick != "Disabled" and
+            self.gyro_stick_mouse_stick == self.gyro_stick_scroll_stick
+        ):
+            self.gyro_stick_scroll_stick = "Disabled"
+            return False
+        return True
         
     def save_config(self):
         try:
+            self.validate_gyro_stick_assignments()
             # Read current file to preserve comments/other sections if possible
             # (Though yaml.dump will lose comments anyway, but we load first)
             data = {}
@@ -316,11 +353,21 @@ class Config:
             data['srr_mapping'] = self.srr_mapping
             data['home_mapping'] = self.home_mapping
             data['capt_mapping'] = self.capt_mapping
+            data['a_mapping'] = self.a_mapping
+            data['b_mapping'] = self.b_mapping
+            data['x_mapping'] = self.x_mapping
+            data['y_mapping'] = self.y_mapping
             
             data['gyro_mode'] = self.gyro_mode
             data['gyro_sensitivity'] = self.gyro_sensitivity
             data['gyro_activation_mode'] = self.gyro_activation_mode
             data['stick_mouse_sensitivity'] = self.stick_mouse_sensitivity
+            data['gyro_stick_mouse_stick'] = self.gyro_stick_mouse_stick
+            data['gyro_stick_mouse_sensitivity'] = self.gyro_stick_mouse_sensitivity
+            data['gyro_stick_mouse_deadzone'] = self.gyro_stick_mouse_deadzone
+            data['gyro_stick_scroll_stick'] = self.gyro_stick_scroll_stick
+            data['gyro_stick_scroll_sensitivity'] = self.gyro_stick_scroll_sensitivity
+            data['gyro_stick_scroll_deadzone'] = self.gyro_stick_scroll_deadzone
             
             data['gyro_bias_l'] = self.gyro_bias_l
             data['gyro_bias_r'] = self.gyro_bias_r

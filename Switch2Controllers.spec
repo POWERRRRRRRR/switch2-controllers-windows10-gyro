@@ -1,8 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
 
-datas = [('resources', 'resources'), ('config.yaml', 'resources'), ('drivers/install_driver.ps1', 'drivers'), ('drivers/install.bat', 'drivers'), ('drivers/uninstall_driver.ps1', 'drivers'), ('drivers/uninstall.bat', 'drivers'), ('drivers/uninstall_vigembus.ps1', 'drivers'), ('drivers/uninstall_vigembus.bat', 'drivers'), ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHid Driver/WinUHidDriver.inf', 'drivers'), ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHid Driver/WinUHidDriver.dll', 'drivers'), ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHid Driver/winuhiddriver.cat', 'drivers'), ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHidDriver.cer', 'drivers')]
-binaries = [('drivers/WinUHid.dll', 'drivers'), ('drivers/WinUHidDevs.dll', 'drivers')]
+datas = [(src, dst) for src, dst in [
+    ('resources', 'resources'),
+    ('config.yaml', 'resources'),
+    ('drivers/install_driver.ps1', 'drivers'),
+    ('drivers/install.bat', 'drivers'),
+    ('drivers/uninstall_driver.ps1', 'drivers'),
+    ('drivers/uninstall.bat', 'drivers'),
+    ('drivers/uninstall_vigembus.ps1', 'drivers'),
+    ('drivers/uninstall_vigembus.bat', 'drivers'),
+    ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHid Driver/WinUHidDriver.inf', 'drivers'),
+    ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHid Driver/WinUHidDriver.dll', 'drivers'),
+    ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHid Driver/winuhiddriver.cat', 'drivers'),
+    ('WinUHid-main/WinUHid Driver/build/Release/x64/WinUHidDriver.cer', 'drivers'),
+] if Path(src).exists()]
+binaries = [(src, dst) for src, dst in [
+    ('drivers/WinUHid.dll', 'drivers'),
+    ('drivers/WinUHidDevs.dll', 'drivers'),
+] if Path(src).exists()]
 hiddenimports = ['imufusion']
 tmp_ret = collect_all('vgamepad')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

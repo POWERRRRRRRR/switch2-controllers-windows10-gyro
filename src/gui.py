@@ -12,7 +12,7 @@ import os
 import ctypes
 from controller import Controller, INPUT_REPORT_UUID, COMMAND_RESPONSE_UUID
 from discoverer import start_discoverer, set_shutting_down, set_suspending, emergency_cleanup
-from config import get_resource, CONFIG, BACK_BUTTON_OPTIONS, get_driver_path
+from config import get_resource, CONFIG, BACK_BUTTON_OPTIONS, BUTTON_MAPPING_OPTIONS, STICK_ASSIGNMENT_OPTIONS, get_driver_path
 from virtual_controller import VirtualController
 from discoverer import split_controller, merge_controllers, VIRTUAL_CONTROLLERS
 from utils import set_startup
@@ -1320,7 +1320,10 @@ class ControllerWindow:
         controller_frame_size = int(200 * scaling_factor)
         battery_height = int(40 * scaling_factor)
 
-        self.check_driver_installation()
+        if os.environ.get("SWITCH2_SKIP_DRIVER_CHECK") == "1":
+            logger.info("Skipping driver installation check because SWITCH2_SKIP_DRIVER_CHECK=1")
+        else:
+            self.check_driver_installation()
         
         self.calibration_overlay = CalibrationOverlay(self.root)
         import utils
@@ -1606,6 +1609,48 @@ class ControllerWindow:
         self.stick_scale.set(getattr(CONFIG, "stick_mouse_sensitivity", 5.0))
         self.stick_scale.grid(row=1, column=4, columnspan=1, pady=(int(10 * scaling_factor), 0), sticky="w")
 
+        tk.Label(self.gyro_frame, text="Mouse Move Stick:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=2, column=0, padx=int(5 * scaling_factor), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stick_mouse_switch = ToggleSwitch(
+            self.gyro_frame,
+            labels=["Off", "Left", "Right"],
+            values=STICK_ASSIGNMENT_OPTIONS,
+            initial_value=getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled"),
+            command=self.update_gyro_stick_mouse_stick_setting,
+            bg_color=background_color
+        )
+        self.gyro_stick_mouse_switch.grid(row=2, column=1, columnspan=2, padx=int(5 * scaling_factor), pady=(int(10 * scaling_factor), 0), sticky="w")
+
+        tk.Label(self.gyro_frame, text="Sensitivity:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=2, column=3, padx=(int(20 * scaling_factor), int(5 * scaling_factor)), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stick_mouse_sens_scale = tk.Scale(self.gyro_frame, from_=0, to=10, resolution=0.2, orient=tk.HORIZONTAL, length=int(120 * scaling_factor), bg=background_color, fg=text_color, troughcolor=button_gray, activebackground=highlight_color, highlightthickness=0, bd=0, sliderrelief=tk.FLAT, sliderlength=int(15 * scaling_factor), width=int(15 * scaling_factor), font=scale_font(("Arial", 12, "bold")), command=self.on_gyro_stick_setting_changed)
+        self.gyro_stick_mouse_sens_scale.set(getattr(CONFIG, "gyro_stick_mouse_sensitivity", 5.0))
+        self.gyro_stick_mouse_sens_scale.grid(row=2, column=4, pady=(int(10 * scaling_factor), 0), sticky="w")
+
+        tk.Label(self.gyro_frame, text="Deadzone:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=2, column=5, padx=(int(20 * scaling_factor), int(5 * scaling_factor)), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stick_mouse_deadzone_scale = tk.Scale(self.gyro_frame, from_=0.0, to=0.8, resolution=0.05, orient=tk.HORIZONTAL, length=int(120 * scaling_factor), bg=background_color, fg=text_color, troughcolor=button_gray, activebackground=highlight_color, highlightthickness=0, bd=0, sliderrelief=tk.FLAT, sliderlength=int(15 * scaling_factor), width=int(15 * scaling_factor), font=scale_font(("Arial", 12, "bold")), command=self.on_gyro_stick_setting_changed)
+        self.gyro_stick_mouse_deadzone_scale.set(getattr(CONFIG, "gyro_stick_mouse_deadzone", 0.15))
+        self.gyro_stick_mouse_deadzone_scale.grid(row=2, column=6, pady=(int(10 * scaling_factor), 0), sticky="w")
+
+        tk.Label(self.gyro_frame, text="Scroll Wheel Stick:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=3, column=0, padx=int(5 * scaling_factor), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stick_scroll_switch = ToggleSwitch(
+            self.gyro_frame,
+            labels=["Off", "Left", "Right"],
+            values=STICK_ASSIGNMENT_OPTIONS,
+            initial_value=getattr(CONFIG, "gyro_stick_scroll_stick", "Disabled"),
+            command=self.update_gyro_stick_scroll_stick_setting,
+            bg_color=background_color
+        )
+        self.gyro_stick_scroll_switch.grid(row=3, column=1, columnspan=2, padx=int(5 * scaling_factor), pady=(int(10 * scaling_factor), 0), sticky="w")
+
+        tk.Label(self.gyro_frame, text="Scroll Sens:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=3, column=3, padx=(int(20 * scaling_factor), int(5 * scaling_factor)), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stick_scroll_sens_scale = tk.Scale(self.gyro_frame, from_=0, to=5, resolution=0.1, orient=tk.HORIZONTAL, length=int(120 * scaling_factor), bg=background_color, fg=text_color, troughcolor=button_gray, activebackground=highlight_color, highlightthickness=0, bd=0, sliderrelief=tk.FLAT, sliderlength=int(15 * scaling_factor), width=int(15 * scaling_factor), font=scale_font(("Arial", 12, "bold")), command=self.on_gyro_stick_setting_changed)
+        self.gyro_stick_scroll_sens_scale.set(getattr(CONFIG, "gyro_stick_scroll_sensitivity", 1.0))
+        self.gyro_stick_scroll_sens_scale.grid(row=3, column=4, pady=(int(10 * scaling_factor), 0), sticky="w")
+
+        tk.Label(self.gyro_frame, text="Scroll Deadzone:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=3, column=5, padx=(int(20 * scaling_factor), int(5 * scaling_factor)), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stick_scroll_deadzone_scale = tk.Scale(self.gyro_frame, from_=0.0, to=0.8, resolution=0.05, orient=tk.HORIZONTAL, length=int(120 * scaling_factor), bg=background_color, fg=text_color, troughcolor=button_gray, activebackground=highlight_color, highlightthickness=0, bd=0, sliderrelief=tk.FLAT, sliderlength=int(15 * scaling_factor), width=int(15 * scaling_factor), font=scale_font(("Arial", 12, "bold")), command=self.on_gyro_stick_setting_changed)
+        self.gyro_stick_scroll_deadzone_scale.set(getattr(CONFIG, "gyro_stick_scroll_deadzone", 0.20))
+        self.gyro_stick_scroll_deadzone_scale.grid(row=3, column=6, pady=(int(10 * scaling_factor), 0), sticky="w")
+
 
     def init_auto_disconnect_panel(self):
         self.auto_disconnect_frame = tk.LabelFrame(self.root, text=" Auto Disconnect ", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold")), padx=int(10 * scaling_factor), pady=int(10 * scaling_factor))
@@ -1724,6 +1769,42 @@ class ControllerWindow:
             with open(CONFIG.config_file_path, 'w', encoding='utf-8') as f: yaml.dump(data, f, default_flow_style=False)
         except Exception as e: logger.error(f"Failed to save mouse sensitivity: {e}")
 
+    def update_gyro_stick_mouse_stick_setting(self, val):
+        CONFIG.gyro_stick_mouse_stick = val
+        if val != "Disabled" and getattr(CONFIG, "gyro_stick_scroll_stick", "Disabled") == val:
+            CONFIG.gyro_stick_scroll_stick = "Disabled"
+            if hasattr(self, "gyro_stick_scroll_switch"):
+                self.gyro_stick_scroll_switch.set_value("Disabled")
+        self.on_gyro_stick_setting_changed()
+
+    def update_gyro_stick_scroll_stick_setting(self, val):
+        CONFIG.gyro_stick_scroll_stick = val
+        if val != "Disabled" and getattr(CONFIG, "gyro_stick_mouse_stick", "Disabled") == val:
+            CONFIG.gyro_stick_mouse_stick = "Disabled"
+            if hasattr(self, "gyro_stick_mouse_switch"):
+                self.gyro_stick_mouse_switch.set_value("Disabled")
+        self.on_gyro_stick_setting_changed()
+
+    def on_gyro_stick_setting_changed(self, *args):
+        required = [
+            "gyro_stick_mouse_sens_scale",
+            "gyro_stick_mouse_deadzone_scale",
+            "gyro_stick_scroll_sens_scale",
+            "gyro_stick_scroll_deadzone_scale",
+        ]
+        if not all(hasattr(self, attr) for attr in required):
+            return
+        CONFIG.gyro_stick_mouse_sensitivity = float(self.gyro_stick_mouse_sens_scale.get())
+        CONFIG.gyro_stick_mouse_deadzone = float(self.gyro_stick_mouse_deadzone_scale.get())
+        CONFIG.gyro_stick_scroll_sensitivity = float(self.gyro_stick_scroll_sens_scale.get())
+        CONFIG.gyro_stick_scroll_deadzone = float(self.gyro_stick_scroll_deadzone_scale.get())
+        CONFIG.validate_gyro_stick_assignments()
+        if hasattr(self, "gyro_stick_mouse_switch"):
+            self.gyro_stick_mouse_switch.set_value(CONFIG.gyro_stick_mouse_stick)
+        if hasattr(self, "gyro_stick_scroll_switch"):
+            self.gyro_stick_scroll_switch.set_value(CONFIG.gyro_stick_scroll_stick)
+        CONFIG.save_config()
+
     def on_gyro_setting_changed(self, *args):
         if not hasattr(self, 'sens_scale') or not hasattr(self, 'stick_scale'):
             return
@@ -1821,6 +1902,15 @@ class ControllerWindow:
         for key, label in [("home", "Home:"), ("capt", "Capture:"), ("c", "Chat:")]:
             tk.Label(row_shared, text=label, bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).pack(side=tk.LEFT, padx=(int(5 * scaling_factor), int(2 * scaling_factor)))
             combo = ttk.Combobox(row_shared, values=BACK_BUTTON_OPTIONS, font=scale_font(("Arial", 12, "bold")), state="readonly", width=11, justify="center")
+            combo.set(getattr(CONFIG, f"{key}_mapping")); combo.pack(side=tk.LEFT, padx=int(2 * scaling_factor))
+            combo.bind("<<ComboboxSelected>>", self.on_setting_changed)
+            setattr(self, f"{key}_combo", combo)
+
+        row_face = tk.Frame(self.settings_frame, bg=background_color); row_face.pack(side=tk.TOP, fill=tk.X, pady=int(5 * scaling_factor))
+        tk.Label(row_face, text="Face Buttons:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).pack(side=tk.LEFT, padx=(int(10 * scaling_factor), int(5 * scaling_factor)))
+        for key, label in [("a", "A:"), ("b", "B:"), ("x", "X:"), ("y", "Y:")]:
+            tk.Label(row_face, text=label, bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).pack(side=tk.LEFT, padx=(int(5 * scaling_factor), int(2 * scaling_factor)))
+            combo = ttk.Combobox(row_face, values=BUTTON_MAPPING_OPTIONS, font=scale_font(("Arial", 12, "bold")), state="readonly", width=17, justify="center")
             combo.set(getattr(CONFIG, f"{key}_mapping")); combo.pack(side=tk.LEFT, padx=int(2 * scaling_factor))
             combo.bind("<<ComboboxSelected>>", self.on_setting_changed)
             setattr(self, f"{key}_combo", combo)
@@ -1959,6 +2049,10 @@ class ControllerWindow:
         CONFIG.gl_mapping = self.gl_combo.get()
         CONFIG.gr_mapping = self.gr_combo.get()
         CONFIG.c_mapping = self.c_combo.get()
+        CONFIG.a_mapping = self.a_combo.get()
+        CONFIG.b_mapping = self.b_combo.get()
+        CONFIG.x_mapping = self.x_combo.get()
+        CONFIG.y_mapping = self.y_combo.get()
         CONFIG.sll_mapping = self.sll_combo.get()
         CONFIG.srl_mapping = self.srl_combo.get()
         CONFIG.slr_mapping = self.slr_combo.get()
@@ -1966,7 +2060,7 @@ class ControllerWindow:
         try:
             with open(CONFIG.config_file_path, 'r', encoding='utf-8') as f: data = yaml.safe_load(f) or {}
             data['abxy_mode'] = CONFIG.abxy_mode  
-            for k in ['home_mapping','capt_mapping','gl_mapping','gr_mapping','c_mapping','sll_mapping','srl_mapping','slr_mapping','srr_mapping']: data[k] = getattr(CONFIG, k)
+            for k in ['home_mapping','capt_mapping','gl_mapping','gr_mapping','c_mapping','a_mapping','b_mapping','x_mapping','y_mapping','sll_mapping','srl_mapping','slr_mapping','srr_mapping']: data[k] = getattr(CONFIG, k)
             with open(CONFIG.config_file_path, 'w', encoding='utf-8') as f: yaml.dump(data, f, default_flow_style=False)
         except Exception as e: logger.error(f"Failed to save settings: {e}")
         self.root.focus_set()
