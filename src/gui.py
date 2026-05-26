@@ -12,7 +12,7 @@ import os
 import ctypes
 from controller import Controller, INPUT_REPORT_UUID, COMMAND_RESPONSE_UUID
 from discoverer import start_discoverer, set_shutting_down, set_suspending, emergency_cleanup
-from config import get_resource, CONFIG, BACK_BUTTON_OPTIONS, BUTTON_MAPPING_OPTIONS, STICK_ASSIGNMENT_OPTIONS, get_driver_path
+from config import get_resource, CONFIG, BACK_BUTTON_OPTIONS, BUTTON_MAPPING_OPTIONS, STICK_ASSIGNMENT_OPTIONS, GYRO_STABILIZATION_OPTIONS, get_driver_path
 from virtual_controller import VirtualController
 from discoverer import split_controller, merge_controllers, VIRTUAL_CONTROLLERS
 from utils import set_startup
@@ -1659,6 +1659,17 @@ class ControllerWindow:
         self.gyro_stick_scroll_deadzone_scale.set(getattr(CONFIG, "gyro_stick_scroll_deadzone", 0.20))
         self.gyro_stick_scroll_deadzone_scale.grid(row=3, column=6, pady=(int(10 * scaling_factor), 0), sticky="w")
 
+        tk.Label(self.gyro_frame, text="Stabilization:", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold"))).grid(row=4, column=0, padx=int(5 * scaling_factor), pady=(int(10 * scaling_factor), 0), sticky="e")
+        self.gyro_stabilization_switch = ToggleSwitch(
+            self.gyro_frame,
+            labels=["Off", "Balanced", "Stable"],
+            values=GYRO_STABILIZATION_OPTIONS,
+            initial_value=getattr(CONFIG, "gyro_stabilization_mode", "Off"),
+            command=self.update_gyro_stabilization_setting,
+            bg_color=background_color
+        )
+        self.gyro_stabilization_switch.grid(row=4, column=1, columnspan=3, padx=int(5 * scaling_factor), pady=(int(10 * scaling_factor), 0), sticky="w")
+
 
     def init_auto_disconnect_panel(self):
         self.auto_disconnect_frame = tk.LabelFrame(self.root, text=" Auto Disconnect ", bg=background_color, fg=text_color, font=scale_font(("Arial", 12, "bold")), padx=int(10 * scaling_factor), pady=int(10 * scaling_factor))
@@ -1767,6 +1778,10 @@ class ControllerWindow:
         CONFIG.gyro_activation_mode = val
         self.on_gyro_setting_changed()
 
+    def update_gyro_stabilization_setting(self, val):
+        CONFIG.gyro_stabilization_mode = val
+        self.on_gyro_setting_changed()
+
     def update_mouse_sensitivity(self, val):
         new_sens = float(val)
         CONFIG.mouse_config.sensitivity = new_sens
@@ -1822,6 +1837,7 @@ class ControllerWindow:
             with open(CONFIG.config_file_path, 'r', encoding='utf-8') as f: data = yaml.safe_load(f) or {}
             data['gyro_mode'] = CONFIG.gyro_mode
             data['gyro_sensitivity'] = CONFIG.gyro_sensitivity
+            data['gyro_stabilization_mode'] = getattr(CONFIG, "gyro_stabilization_mode", "Off")
             data['gyro_activation_mode'] = CONFIG.gyro_activation_mode
             data['stick_mouse_sensitivity'] = CONFIG.stick_mouse_sensitivity
             with open(CONFIG.config_file_path, 'w', encoding='utf-8') as f: yaml.dump(data, f, default_flow_style=False)

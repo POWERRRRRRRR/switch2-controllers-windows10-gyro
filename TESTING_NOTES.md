@@ -24,6 +24,7 @@ python .\src\gui.py
 - Driver: WinUHid
 - Joy-con Mouse: OFF
 - Built-in Gyro: 6-Axis
+- Gyro Stabilization: Balanced
 - Activation: Toggle
 - Capture or Chat: Gyro
 - A: Mouse Left Click
@@ -53,11 +54,15 @@ python .\src\gui.py
 13. Switch between L Gyro and R Gyro and confirm the old gyro side does not keep moving the cursor after the side changes.
 14. Minimize or hide the app to the system tray for several minutes and confirm gyro, A/B mappings, Mouse Move Stick, and Scroll Wheel Stick still work.
 15. Check idle/background CPU while connected. With no stick or gyro movement, CPU should be much lower than the previous fixed 1000 Hz polling behavior.
+16. Set Gyro Stabilization to Balanced, hold the active Joy-Con still, and confirm small hand tremor is reduced without making fast cursor movement feel delayed.
+17. Switch Gyro Stabilization to Stable and confirm it is steadier but slightly less responsive than Balanced.
+18. Switch Gyro Stabilization to Off and confirm the previous gyro mouse behavior is restored.
 
 ## Notes
 
 - Joy-Con optical mouse mode remains controlled by the existing Joy-con Mouse setting and is not required for the gyro stick mouse or stick wheel features.
 - 6-Axis air mouse uses the low-power direct gyro path. 9-Axis still uses sensor fusion and is expected to cost more CPU.
+- Gyro Stabilization only affects Windows gyro mouse movement. Off preserves the previous behavior; Balanced is the recommended air-mouse starting point; Stable favors click stability and reading/scrolling tasks.
 - The Gyro trigger controls gyro sensor cursor movement only. Explicit stick mouse, stick wheel, and mouse-button mappings remain active when gyro sensor movement is toggled off.
 - Switching L Gyro / R Gyro resets the gyro sensor activation state so the previous side cannot keep a stale gyro mouse state.
 - Mouse control over elevated windows such as an administrator Task Manager may still be blocked by Windows integrity-level isolation unless the app itself is elevated. This project should not elevate itself or install extra mouse drivers.

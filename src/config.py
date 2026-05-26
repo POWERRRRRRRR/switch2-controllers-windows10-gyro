@@ -49,6 +49,7 @@ BUTTON_MAPPING_OPTIONS = [
 ] + [option for option in BACK_BUTTON_OPTIONS if option != "Default"]
 
 STICK_ASSIGNMENT_OPTIONS = ["Disabled", "Left Stick", "Right Stick"]
+GYRO_STABILIZATION_OPTIONS = ["Off", "Balanced", "Stable"]
 
 XB_BUTTONS = {
     "UP": 0x0001,
@@ -162,6 +163,10 @@ class Config:
     def _normalize_button_mapping(value):
         return value if value in BUTTON_MAPPING_OPTIONS else "Default"
 
+    @staticmethod
+    def _normalize_gyro_stabilization_mode(value):
+        return value if value in GYRO_STABILIZATION_OPTIONS else "Off"
+
     def __init__(self, config_file_path: str):
         if hasattr(sys, 'frozen'):
             base_dir = os.path.dirname(sys.executable)
@@ -260,6 +265,7 @@ class Config:
         self.gyro_mode = config.get("gyro_mode", "World")
         self.gyro_sensitivity = float(config.get("gyro_sensitivity", 0.3))
         self.gyro_smoothing = 0.0 
+        self.gyro_stabilization_mode = self._normalize_gyro_stabilization_mode(config.get("gyro_stabilization_mode", "Off"))
         self.gyro_activation_mode = config.get("gyro_activation_mode", "Toggle")
         self.stick_mouse_sensitivity = float(config.get("stick_mouse_sensitivity", 20.0))
         self.gyro_stick_mouse_stick = self._normalize_stick_assignment(config.get("gyro_stick_mouse_stick", "Disabled"))
@@ -360,6 +366,7 @@ class Config:
             
             data['gyro_mode'] = self.gyro_mode
             data['gyro_sensitivity'] = self.gyro_sensitivity
+            data['gyro_stabilization_mode'] = self._normalize_gyro_stabilization_mode(getattr(self, "gyro_stabilization_mode", "Off"))
             data['gyro_activation_mode'] = self.gyro_activation_mode
             data['stick_mouse_sensitivity'] = self.stick_mouse_sensitivity
             data['gyro_stick_mouse_stick'] = self.gyro_stick_mouse_stick

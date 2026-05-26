@@ -79,6 +79,62 @@ def _release_global_mouse_button_sources(source_prefix: str):
         _, up_event = _MOUSE_BUTTON_EVENTS[button_name]
         win32api.mouse_event(up_event, 0, 0, 0, 0)
 
+class _OneEuroFilter:
+    def __init__(self):
+        self.x_prev = None
+        self.dx_prev = 0.0
+
+    def reset(self):
+        self.x_prev = None
+        self.dx_prev = 0.0
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        cutoff = max(0.001, float(cutoff))
+        dt = max(0.001, min(0.05, float(dt)))
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    @staticmethod
+    def _low_pass(value: float, previous: float, alpha: float) -> float:
+        return alpha * value + (1.0 - alpha) * previous
+
+    def apply(self, value: float, dt: float, min_cutoff: float, beta: float, d_cutoff: float) -> float:
+        if self.x_prev is None:
+            self.x_prev = value
+            self.dx_prev = 0.0
+            return value
+
+        dt = max(0.001, min(0.05, float(dt)))
+        dx = (value - self.x_prev) / dt
+        dx_alpha = self._alpha(d_cutoff, dt)
+        dx_hat = self._low_pass(dx, self.dx_prev, dx_alpha)
+        cutoff = float(min_cutoff) + float(beta) * abs(dx_hat)
+        x_alpha = self._alpha(cutoff, dt)
+        x_hat = self._low_pass(value, self.x_prev, x_alpha)
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        return x_hat
+
+_GYRO_STABILIZATION_PRESETS = {
+    "Balanced": {
+        "min_cutoff": 1.8,
+        "beta": 0.05,
+        "d_cutoff": 1.0,
+        "deadzone_dps": 0.10,
+        "full_speed_dps": 5.0,
+        "low_gain": 0.58,
+    },
+    "Stable": {
+        "min_cutoff": 1.2,
+        "beta": 0.04,
+        "d_cutoff": 1.0,
+        "deadzone_dps": 0.16,
+        "full_speed_dps": 7.0,
+        "low_gain": 0.46,
+    },
+}
+
 # Controller identification info
 NINTENDO_VENDOR_ID = 0x057e
 JOYCON2_RIGHT_PID = 0x2066
@@ -285,6 +341,9 @@ class Controller:
         
         self.gyro_target_vx = 0.0
         self.gyro_target_vy = 0.0
+        self.eff_h_raw = 0.0
+        self.eff_v_raw = 0.0
+        self.gyro_mouse_scale = 16.384
         self.gyro_stick_target_vx = 0.0
         self.gyro_stick_target_vy = 0.0
         self.gyro_stick_mouse_active = False
@@ -344,6 +403,12 @@ class Controller:
         
         self.q_world_offset = None 
         self.gyro_moving_envelope = 0.0
+        self.gyro_filter_h = _OneEuroFilter()
+        self.gyro_filter_v = _OneEuroFilter()
+        self.gyro_stabilization_filter_mode = None
+        self.gyro_stabilization_last_time = None
+        self.gyro_stabilization_gate_active = False
+        self.gyro_stabilization_inactive_since = None
         self._suspended = False
         self.prev_q = None
         
@@ -1192,6 +1257,75 @@ class Controller:
         self.gyro_moving_envelope = 0.0
         self.last_fusion_time = time.perf_counter()
         self.prev_q = None
+        self._reset_gyro_mouse_stabilization()
+
+    def _reset_gyro_mouse_stabilization(self):
+        if hasattr(self, "gyro_filter_h"):
+            self.gyro_filter_h.reset()
+        if hasattr(self, "gyro_filter_v"):
+            self.gyro_filter_v.reset()
+        self.gyro_stabilization_last_time = None
+        self.gyro_stabilization_gate_active = False
+        self.gyro_stabilization_inactive_since = None
+
+    @staticmethod
+    def _smoothstep(value: float) -> float:
+        value = max(0.0, min(1.0, value))
+        return value * value * (3.0 - 2.0 * value)
+
+    def _apply_gyro_mouse_stabilization(self, eff_h: float, eff_v: float, gyro_scale: float, now: float):
+        mode = getattr(CONFIG, "gyro_stabilization_mode", "Off")
+        params = _GYRO_STABILIZATION_PRESETS.get(mode)
+        if params is None:
+            if getattr(self, "gyro_stabilization_filter_mode", None) != "Off":
+                self._reset_gyro_mouse_stabilization()
+                self.gyro_stabilization_filter_mode = "Off"
+            return eff_h, eff_v, 0.0
+
+        if getattr(self, "gyro_stabilization_filter_mode", None) != mode:
+            self._reset_gyro_mouse_stabilization()
+            self.gyro_stabilization_filter_mode = mode
+
+        last_time = getattr(self, "gyro_stabilization_last_time", None)
+        if last_time is None:
+            dt = 1.0 / 120.0
+        else:
+            dt = now - last_time
+            if dt <= 0.0 or dt > 0.10:
+                self._reset_gyro_mouse_stabilization()
+                dt = 1.0 / 120.0
+        self.gyro_stabilization_last_time = now
+
+        h_dps = eff_h / gyro_scale
+        v_dps = eff_v / gyro_scale
+        h_dps = self.gyro_filter_h.apply(
+            h_dps, dt, params["min_cutoff"], params["beta"], params["d_cutoff"]
+        )
+        v_dps = self.gyro_filter_v.apply(
+            v_dps, dt, params["min_cutoff"], params["beta"], params["d_cutoff"]
+        )
+
+        mag = math.sqrt(h_dps * h_dps + v_dps * v_dps)
+        enter = float(params["deadzone_dps"])
+        release = enter * 0.65
+        gate_active = getattr(self, "gyro_stabilization_gate_active", False)
+        if gate_active:
+            gate_active = mag > release
+        else:
+            gate_active = mag >= enter
+        self.gyro_stabilization_gate_active = gate_active
+        if not gate_active or mag <= 0.0:
+            return 0.0, 0.0, enter * gyro_scale
+
+        effective_mag = max(0.0, mag - release)
+        if effective_mag <= 0.0:
+            return 0.0, 0.0, enter * gyro_scale
+
+        full_speed = max(enter + 0.001, float(params["full_speed_dps"]))
+        t = effective_mag / max(0.001, full_speed - release)
+        gain = float(params["low_gain"]) + (1.0 - float(params["low_gain"])) * self._smoothstep(t)
+        scale = (effective_mag / mag) * gain
+        return h_dps * scale * gyro_scale, v_dps * scale * gyro_scale, enter * gyro_scale
 
     def _mahony_update(self, gx, gy, gz, ax, ay, az, mx, my, mz, dt):
         current_mode = getattr(CONFIG, "gyro_mode", "World")
@@ -1278,6 +1412,13 @@ class Controller:
             else:
                 suppress_for = 0.020
                 ramp_for = 0.035
+            stabilization_mode = getattr(CONFIG, "gyro_stabilization_mode", "Off")
+            if stabilization_mode == "Balanced":
+                suppress_for += 0.008
+                ramp_for += 0.012
+            elif stabilization_mode == "Stable":
+                suppress_for += 0.018
+                ramp_for += 0.025
             self.gyro_click_suppress_until = max(
                 getattr(self, "gyro_click_suppress_until", 0.0),
                 now + suppress_for
@@ -1300,6 +1441,7 @@ class Controller:
         self.gyro_residual_x = 0.0
         self.gyro_residual_y = 0.0
         self._own_steer_value = 0.0
+        self._reset_gyro_mouse_stabilization()
         if reset_stick:
             self.gyro_stick_target_vx = 0.0
             self.gyro_stick_target_vy = 0.0
@@ -1482,6 +1624,7 @@ class Controller:
                     else:
                         CONFIG.gyro_bias_r = list(self.gyro_bias)
                     CONFIG.save_config()
+                    self._reset_gyro_mouse_stabilization()
 
                     if getattr(self, 'back_button_calibration_active', False):
                         vc = getattr(self, 'virtual_controller', None)
@@ -1558,6 +1701,8 @@ class Controller:
         self.soft_dz_v = 0.0
         self.eff_h_final = 0.0
         self.eff_v_final = 0.0
+        self.eff_h_raw = 0.0
+        self.eff_v_raw = 0.0
 
         if current_mode in ["World", "Yaw"]:
             if current_mode == "Yaw":
@@ -1598,6 +1743,9 @@ class Controller:
                 eff_v = g_world_abs[0] * r_h[0] + g_world_abs[1] * r_h[1]
 
             gyro_scale = 14.285714 if self.is_pro_controller() else 16.384
+            self.gyro_mouse_scale = gyro_scale
+            self.eff_h_raw = eff_h
+            self.eff_v_raw = eff_v
             omega = math.sqrt(eff_h**2 + eff_v**2) / gyro_scale
             
             if not hasattr(self, 'gyro_moving_envelope'):
@@ -1704,7 +1852,13 @@ class Controller:
             self.gyro_target_vy = 0.0
             self._own_steer_value = 0.0
             self.gyro_residual_x = self.gyro_residual_y = 0.0
+            inactive_since = getattr(self, "gyro_stabilization_inactive_since", None)
+            if inactive_since is None:
+                self.gyro_stabilization_inactive_since = now
+            elif now - inactive_since > 0.25:
+                self._reset_gyro_mouse_stabilization()
             return
+        self.gyro_stabilization_inactive_since = None
 
         target_vx = 0.0
         target_vy = 0.0
@@ -1713,6 +1867,23 @@ class Controller:
             if current_mode in ["World", "Yaw"]:
                 sensitivity = getattr(CONFIG, "gyro_sensitivity", 0.3)
                 accel_factor = 0.002
+                mouse_eff_h = self.eff_h_final
+                mouse_eff_v = self.eff_v_final
+                stabilization_mode = getattr(CONFIG, "gyro_stabilization_mode", "Off")
+                if stabilization_mode in _GYRO_STABILIZATION_PRESETS:
+                    mouse_eff_h, mouse_eff_v, mouse_deadzone = self._apply_gyro_mouse_stabilization(
+                        getattr(self, "eff_h_raw", 0.0),
+                        getattr(self, "eff_v_raw", 0.0),
+                        getattr(self, "gyro_mouse_scale", 16.384),
+                        now
+                    )
+                    self.soft_dz_h = mouse_deadzone
+                    self.soft_dz_v = mouse_deadzone
+                    self.eff_h_final = mouse_eff_h
+                    self.eff_v_final = mouse_eff_v
+                elif getattr(self, "gyro_stabilization_filter_mode", None) != "Off":
+                    self._reset_gyro_mouse_stabilization()
+                    self.gyro_stabilization_filter_mode = "Off"
                 
                 v_sign = -1.0
                 if self.is_joycon_right() and self.hold_mode == "Horizontal":
@@ -1727,8 +1898,8 @@ class Controller:
                 else:
                     click_scale = (now - suppress_until) / max(0.001, ramp_until - suppress_until)
                 if click_scale > 0.0:
-                    target_vx += self.eff_h_final * sensitivity * accel_factor * click_scale
-                    target_vy += self.eff_v_final * v_sign * sensitivity * accel_factor * click_scale
+                    target_vx += mouse_eff_h * sensitivity * accel_factor * click_scale
+                    target_vy += mouse_eff_v * v_sign * sensitivity * accel_factor * click_scale
             elif current_mode == "Roll":
                 ax, ay, az = inputData.accelerometer
                 
