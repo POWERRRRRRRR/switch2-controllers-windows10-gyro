@@ -14,7 +14,7 @@ import math
 import imufusion
 import numpy as np
 try:
-    ctypes.windll.winmm.timeBeginPeriod(4)
+    ctypes.windll.winmm.timeBeginPeriod(2)
 except Exception:
     pass
 from config import CONFIG, SWITCH_BUTTONS
@@ -118,20 +118,20 @@ class _OneEuroFilter:
 
 _GYRO_STABILIZATION_PRESETS = {
     "Balanced": {
-        "min_cutoff": 1.8,
-        "beta": 0.05,
+        "min_cutoff": 3.2,
+        "beta": 0.08,
         "d_cutoff": 1.0,
-        "deadzone_dps": 0.10,
-        "full_speed_dps": 5.0,
-        "low_gain": 0.58,
+        "deadzone_dps": 0.06,
+        "full_speed_dps": 3.0,
+        "low_gain": 0.76,
     },
     "Stable": {
-        "min_cutoff": 1.2,
-        "beta": 0.04,
+        "min_cutoff": 2.0,
+        "beta": 0.06,
         "d_cutoff": 1.0,
-        "deadzone_dps": 0.16,
-        "full_speed_dps": 7.0,
-        "low_gain": 0.46,
+        "deadzone_dps": 0.12,
+        "full_speed_dps": 5.0,
+        "low_gain": 0.58,
     },
 }
 
@@ -1414,11 +1414,11 @@ class Controller:
                 ramp_for = 0.035
             stabilization_mode = getattr(CONFIG, "gyro_stabilization_mode", "Off")
             if stabilization_mode == "Balanced":
-                suppress_for += 0.008
-                ramp_for += 0.012
+                suppress_for += 0.004
+                ramp_for += 0.006
             elif stabilization_mode == "Stable":
-                suppress_for += 0.018
-                ramp_for += 0.025
+                suppress_for += 0.010
+                ramp_for += 0.015
             self.gyro_click_suppress_until = max(
                 getattr(self, "gyro_click_suppress_until", 0.0),
                 now + suppress_for
@@ -1685,6 +1685,9 @@ class Controller:
         gyro_x = raw_gx - bx
         gyro_y = raw_gy - by
         gyro_z = raw_gz - bz
+        mouse_gyro_x = gyro_x
+        mouse_gyro_y = gyro_y
+        mouse_gyro_z = gyro_z
 
         if getattr(CONFIG, 'stabilized_gyro', False):
             gyro_scale = 14.285714 if self.is_pro_controller() else 16.384
@@ -1706,11 +1709,11 @@ class Controller:
 
         if current_mode in ["World", "Yaw"]:
             if current_mode == "Yaw":
-                eff_h = -gyro_z
+                eff_h = -mouse_gyro_z
                 if self.is_pro_controller() or self.hold_mode == "Vertical":
-                    eff_v = gyro_x
+                    eff_v = mouse_gyro_x
                 else:
-                    eff_v = -gyro_y
+                    eff_v = -mouse_gyro_y
             else:
                 if self.is_pro_controller() or self.hold_mode == "Vertical":
                     g_local = (gyro_x, 0.0, gyro_z)
@@ -1948,8 +1951,8 @@ class Controller:
 
     def _interpolation_thread_loop(self):
         last_time = time.perf_counter()
-        active_sleep = 0.004
-        idle_sleep = 0.012
+        active_sleep = 0.002
+        idle_sleep = 0.010
         inactive_sleep = 0.025
         while self.interp_running:
             mouse_active = (
