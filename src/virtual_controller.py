@@ -64,13 +64,73 @@ class VirtualController:
         
         self.mode = getattr(CONFIG, "simulation_mode", "Xbox")
         self.driver_type = getattr(CONFIG, "driver_type", "WinUHid")
-        self._setup_vg_controller()
-        
         self.state_lock = threading.Lock()
         self._disconnect_lock = asyncio.Lock()
+        self.update_event = threading.Event()
+        self._last_report_update = 0.0
+        self._report_interval = 1.0 / 250.0
+        self._idle_report_interval = 0.25
+        self._last_virtual_input_time = 0.0
+        self._virtual_input_interval = 1.0 / 125.0
+        self._last_virtual_buttons = 0
+        self._last_virtual_axes = (0.0, 0.0, 0.0, 0.0)
         self.running = True
+        self._setup_vg_controller()
+
         self.update_thread = threading.Thread(target=self._1000hz_loop, daemon=True)
         self.update_thread.start()
+
+    def _queue_update(self):
+        if getattr(self, "running", False) and hasattr(self, "update_event"):
+            self.update_event.set()
+
+    def _should_update_virtual_input(self, inputData: ControllerInputData, buttons: int, controller: Controller):
+        import time
+        now = time.perf_counter()
+        if buttons != getattr(self, "_last_virtual_buttons", 0):
+            return True
+
+        if len(self.controllers) == 1:
+            if controller.is_joycon_right() and self.hold_mode != "Vertical":
+                axes = (inputData.right_stick[0], -inputData.right_stick[1], 0.0, 0.0)
+            elif controller.is_joycon_right():
+                axes = (0.0, 0.0, inputData.right_stick[0], -inputData.right_stick[1])
+            else:
+                axes = (inputData.left_stick[0], -inputData.left_stick[1], inputData.right_stick[0], -inputData.right_stick[1])
+        else:
+            axes = (
+                getattr(self, "last_xb_lx", inputData.left_stick[0]),
+                getattr(self, "last_xb_ly", -inputData.left_stick[1]),
+                getattr(self, "last_xb_rx", inputData.right_stick[0]),
+                getattr(self, "last_xb_ry", -inputData.right_stick[1]),
+            )
+            if controller.is_joycon_left():
+                axes = (inputData.left_stick[0], -inputData.left_stick[1], axes[2], axes[3])
+            elif controller.is_joycon_right():
+                axes = (axes[0], axes[1], inputData.right_stick[0], -inputData.right_stick[1])
+
+        last_axes = getattr(self, "_last_virtual_axes", (0.0, 0.0, 0.0, 0.0))
+        if any(abs(a - b) > 0.01 for a, b in zip(axes, last_axes)):
+            return True
+
+        if getattr(CONFIG, "simulation_mode", "Xbox") in ("PS4", "PS5") and getattr(controller, "gyro_active", False):
+            return (now - getattr(self, "_last_virtual_input_time", 0.0)) >= self._virtual_input_interval
+
+        if any(abs(a) > 0.01 for a in axes):
+            return (now - getattr(self, "_last_virtual_input_time", 0.0)) >= self._virtual_input_interval
+
+        return False
+
+    def _remember_virtual_input(self, inputData: ControllerInputData, buttons: int, controller: Controller):
+        import time
+        self._last_virtual_input_time = time.perf_counter()
+        self._last_virtual_buttons = buttons
+        self._last_virtual_axes = (
+            getattr(self, "last_xb_lx", inputData.left_stick[0]),
+            getattr(self, "last_xb_ly", -inputData.left_stick[1]),
+            getattr(self, "last_xb_rx", inputData.right_stick[0]),
+            getattr(self, "last_xb_ry", -inputData.right_stick[1]),
+        )
 
     def _setup_vg_controller(self):
         if self.vg_controller is not None:
@@ -152,12 +212,14 @@ class VirtualController:
         self.was_touching_0 = False
         self.was_touching_1 = False
         self.touch_start_time = 0.0
+        self._queue_update()
 
     def set_mode(self, new_mode):
         if self.mode != new_mode:
             with self.state_lock:
                 self.mode = new_mode
                 self._setup_vg_controller()
+            self._queue_update()
             if self.loop and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(self.update_leds(), self.loop)
 
@@ -400,12 +462,14 @@ class VirtualController:
                 elif controller.is_joycon_right(): buttonsConfig = CONFIG.single_joycon_r_config
                 else: buttonsConfig = CONFIG.procon_config
 
-            if self.mode == "PS4":
-                self.update_as_ps4(inputData, buttons, controller)
-            elif self.mode == "PS5":
-                self.update_as_ps5(inputData, buttons, controller)
-            else:
-                self.update_as_xbox(inputData, buttons, controller, buttonsConfig)
+            if self._should_update_virtual_input(inputData, buttons, controller):
+                if self.mode == "PS4":
+                    self.update_as_ps4(inputData, buttons, controller)
+                elif self.mode == "PS5":
+                    self.update_as_ps5(inputData, buttons, controller)
+                else:
+                    self.update_as_xbox(inputData, buttons, controller, buttonsConfig)
+                self._remember_virtual_input(inputData, buttons, controller)
             
             # Record raw buttons for shared click logic in next report
             controller._last_raw_buttons = current_buttons
@@ -415,6 +479,7 @@ class VirtualController:
     def update_as_ps4(self, inputData: ControllerInputData, buttons: int, controller: Controller):
         with self.state_lock:
             self._update_as_ps4_locked(inputData, buttons, controller)
+        self._queue_update()
 
     def _update_as_ps4_locked(self, inputData: ControllerInputData, buttons: int, controller: Controller):
         driver_type = self.driver_type
@@ -562,6 +627,7 @@ class VirtualController:
     def update_as_ps5(self, inputData: ControllerInputData, buttons: int, controller: Controller):
         with self.state_lock:
             self._update_as_ps5_locked(inputData, buttons, controller)
+        self._queue_update()
 
     def _update_as_ps5_locked(self, inputData: ControllerInputData, buttons: int, controller: Controller):
         self._update_ps_controller_locked(inputData, buttons, controller, self.vg_controller.report, mode="PS5")
@@ -829,6 +895,7 @@ class VirtualController:
                 self.vg_controller.right_trigger(rt)
                 self.vg_controller.left_joystick_float(self.last_xb_lx, self.last_xb_ly)
                 self.vg_controller.right_joystick_float(self.last_xb_rx, self.last_xb_ry)
+        self._queue_update()
 
     def is_single(self): 
         return len(self.controllers) == 1
@@ -864,12 +931,19 @@ class VirtualController:
         import time
         last_time = time.perf_counter()
         while self.running:
+            signaled = self.update_event.wait(timeout=self._idle_report_interval)
+            self.update_event.clear()
+            if not self.running:
+                break
+
             now = time.perf_counter()
+            if signaled:
+                remaining = self._report_interval - (now - self._last_report_update)
+                if remaining > 0:
+                    time.sleep(remaining)
+                    now = time.perf_counter()
+
             dt = now - last_time
-            if dt < 0.001:
-                time.sleep(0)
-                continue
-                
             last_time = now
             if dt > 0.05: dt = 0.015
             
@@ -898,6 +972,7 @@ class VirtualController:
                         self.vg_controller.update()
                 else:
                     self.vg_controller.update()
+            self._last_report_update = time.perf_counter()
         
         logger.info(f"Player {self.player_number}: Update loop thread finished.")
                 
@@ -935,10 +1010,13 @@ class VirtualController:
             self.was_touching_0 = False
             self.was_touching_1 = False
             self.touch_start_time = 0.0
+            self._queue_update()
 
     def force_close(self):
         """Synchronously and forcefully close the virtual device handle."""
         self.running = False
+        if hasattr(self, "update_event"):
+            self.update_event.set()
         
         # 1. Wait for the high-frequency update thread to terminate
         if hasattr(self, 'update_thread') and self.update_thread.is_alive():
@@ -974,6 +1052,8 @@ class VirtualController:
                 return
                 
             self.running = False
+            if hasattr(self, "update_event"):
+                self.update_event.set()
             import time
             current_time = time.strftime("%H:%M:%S")
             logger.info(f"[{current_time}] Player {self.player_number}: Starting disconnect sequence (is_suspending={is_suspending})...")

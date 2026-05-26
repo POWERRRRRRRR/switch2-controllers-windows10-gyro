@@ -14,7 +14,7 @@ import math
 import imufusion
 import numpy as np
 try:
-    ctypes.windll.winmm.timeBeginPeriod(1)
+    ctypes.windll.winmm.timeBeginPeriod(4)
 except Exception:
     pass
 from config import CONFIG, SWITCH_BUTTONS
@@ -822,8 +822,22 @@ class Controller:
             # Filter out virtual button bits and garbage bits from physical reports (retaining only valid physical bits <= 0x03FFFFFF)
             inputData.buttons &= 0x03FFFFFF
 
-            # 9-Axis continuous sensor fusion and stabilized gyro synthesis
-            if not getattr(self, 'is_calibrating', False) and not getattr(self, 'is_mag_calibrating', False) and not getattr(self, 'is_calibration_counting_down', False) and not getattr(self, 'is_mag_calibration_waiting', False):
+            # Run the expensive AHRS path only when a feature actually needs orientation.
+            # 6-Axis air-mouse mode uses a direct gyro path below and should behave like an event-driven mouse.
+            current_mode = getattr(CONFIG, "gyro_mode", "World")
+            needs_sensor_fusion = (
+                current_mode == "World" or
+                getattr(CONFIG, 'stabilized_gyro', False) or
+                getattr(CONFIG, 'steam_roll_compensation', False)
+            )
+            if (
+                needs_sensor_fusion and
+                getattr(self, 'gyro_active', True) and
+                not getattr(self, 'is_calibrating', False) and
+                not getattr(self, 'is_mag_calibrating', False) and
+                not getattr(self, 'is_calibration_counting_down', False) and
+                not getattr(self, 'is_mag_calibration_waiting', False)
+            ):
                 bx, by, bz = self.gyro_bias
                 raw_gx, raw_gy, raw_gz = inputData.gyroscope
                 gyro_x = raw_gx - bx
@@ -1546,36 +1560,43 @@ class Controller:
         self.eff_v_final = 0.0
 
         if current_mode in ["World", "Yaw"]:
-            if self.is_pro_controller() or self.hold_mode == "Vertical":
-                g_local = (gyro_x, 0.0, gyro_z)
+            if current_mode == "Yaw":
+                eff_h = -gyro_z
+                if self.is_pro_controller() or self.hold_mode == "Vertical":
+                    eff_v = gyro_x
+                else:
+                    eff_v = -gyro_y
             else:
-                g_local = (0.0, gyro_y, gyro_z)
-            
-            if getattr(self, 'q_world_offset', None) is None:
-                q_abs = self.orientation
-                f_world = quaternion_rotate_vector(q_abs, (0, 1, 0))
-                yaw_angle = math.atan2(f_world[0], f_world[1])
-                self.q_world_offset = -yaw_angle
-            
-            g_world_abs = quaternion_rotate_vector(self.orientation, g_local)
-            
-            if self.is_pro_controller() or self.hold_mode == "Vertical":
-                f_local = (0, 1, 0)
-            else:
-                f_local = (1, 0, 0)
-            
-            f_world = quaternion_rotate_vector(self.orientation, f_local)
-            
-            fh_x, fh_y = f_world[0], f_world[1]
-            fh_mag = math.sqrt(fh_x**2 + fh_y**2)
-            if fh_mag < 0.01:
-                r_h = (1, 0, 0)
-            else:
-                r_h = (fh_y / fh_mag, -fh_x / fh_mag, 0)
-            
-            eff_h = -g_world_abs[2]
-            eff_v = g_world_abs[0] * r_h[0] + g_world_abs[1] * r_h[1]
-            
+                if self.is_pro_controller() or self.hold_mode == "Vertical":
+                    g_local = (gyro_x, 0.0, gyro_z)
+                else:
+                    g_local = (0.0, gyro_y, gyro_z)
+
+                if getattr(self, 'q_world_offset', None) is None:
+                    q_abs = self.orientation
+                    f_world = quaternion_rotate_vector(q_abs, (0, 1, 0))
+                    yaw_angle = math.atan2(f_world[0], f_world[1])
+                    self.q_world_offset = -yaw_angle
+
+                g_world_abs = quaternion_rotate_vector(self.orientation, g_local)
+
+                if self.is_pro_controller() or self.hold_mode == "Vertical":
+                    f_local = (0, 1, 0)
+                else:
+                    f_local = (1, 0, 0)
+
+                f_world = quaternion_rotate_vector(self.orientation, f_local)
+
+                fh_x, fh_y = f_world[0], f_world[1]
+                fh_mag = math.sqrt(fh_x**2 + fh_y**2)
+                if fh_mag < 0.01:
+                    r_h = (1, 0, 0)
+                else:
+                    r_h = (fh_y / fh_mag, -fh_x / fh_mag, 0)
+
+                eff_h = -g_world_abs[2]
+                eff_v = g_world_abs[0] * r_h[0] + g_world_abs[1] * r_h[1]
+
             gyro_scale = 14.285714 if self.is_pro_controller() else 16.384
             omega = math.sqrt(eff_h**2 + eff_v**2) / gyro_scale
             
@@ -1756,12 +1777,16 @@ class Controller:
 
     def _interpolation_thread_loop(self):
         last_time = time.perf_counter()
+        active_sleep = 0.004
+        idle_sleep = 0.012
+        inactive_sleep = 0.025
         while self.interp_running:
             mouse_active = (
                 self.gyro_mouse_enabled or
                 getattr(self, 'gyro_stick_mouse_active', False) or
                 getattr(self, 'jc_mouse_active', False)
             )
+            has_motion = False
             if self.client and self.client.is_connected and mouse_active:
                 if getattr(self, 'is_calibrating', False):
                     self.current_vx = 0.0
@@ -1777,6 +1802,7 @@ class Controller:
                         getattr(self, 'gyro_stick_target_vy', 0.0) +
                         getattr(self, 'jc_target_vy', 0.0)
                     )
+                has_motion = abs(self.current_vx) > 0.001 or abs(self.current_vy) > 0.001
 
                 now = time.perf_counter()
                 dt = now - last_time
@@ -1801,8 +1827,10 @@ class Controller:
                     win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, move_x, move_y, 0, 0)
             else:
                 last_time = time.perf_counter()
+                time.sleep(inactive_sleep)
+                continue
 
-            time.sleep(0.001)
+            time.sleep(active_sleep if has_motion else idle_sleep)
 
     ### Info Helpers ###
 
